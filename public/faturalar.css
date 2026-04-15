@@ -104,6 +104,8 @@ body {
 .modern-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
 .modern-table th { background: #f1f5f9; padding: 12px 16px; text-align: left; font-weight: 700; color: var(--text-sub); }
 .modern-table td { padding: 14px 16px; border-bottom: 1px solid var(--border); }
+.modern-table th:nth-child(4),
+.modern-table td:nth-child(4) { white-space: nowrap; }
 .modern-table tr:hover { background: #f8fafc; }
 
 /* --- BUTTONS --- */

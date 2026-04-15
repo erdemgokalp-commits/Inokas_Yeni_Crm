@@ -787,9 +787,6 @@ function renderInvoiceTable(invoices) {
             <td class="text-right text-success">${paidAmount.toLocaleString('tr-TR', { style: 'currency', currency: 'TRY' })}</td>
             <td class="text-right text-danger">${remainingAmount.toLocaleString('tr-TR', { style: 'currency', currency: 'TRY' })}</td>
             <td>${statusHtml}</td>
-            <td class="text-center">
-                <button class="btn-text" title="Detay">👁️</button>
-            </td>
         `;
         tableBody.appendChild(row);
         // Tabloyu çizerken önce hemen kartları da hızlıca hesapla

@@ -315,8 +315,7 @@ function parseUBL(xml) {
         // 2. DYNAMIC PARTY LOGIC (Determines if we scrape the Sender or Receiver)
         // currentView 'gelen' means the OTHER company is the Supplier (AccountingSupplierParty)
         // currentView 'giden' means the OTHER company is the Customer (AccountingCustomerParty)
-        // 2. GÜVENLİK KONTROLÜ VE YÖN BULMA (KİM KİME KESMİŞ?)
-        const INOKAS_VKN = "4780552998"; // USTA BURAYA KENDİ VKN'NİZİ GİRECEKSİN!
+        // Not: Asıl güvenlik kontrolü backend'de yapılır.
 
         // A. Gönderen (Satıcı) ve Alan (Müşteri) Zarfını aynı anda XML'den bulalım
         const supplierWrapper = xml.getElementsByTagNameNS(ns.cac, 'AccountingSupplierParty')[0]?.getElementsByTagNameNS(ns.cac, 'Party')[0];
@@ -338,21 +337,7 @@ function parseUBL(xml) {
         const supplierVKN = getVknHizli(supplierWrapper);
         const customerVKN = getVknHizli(customerWrapper);
 
-        // --- C. GÜVENLİK KONTROLLERİ ---
-        // 1- Bu fatura bizim mi? (İnokas ne satıcıda ne de alıcıda yoksa reddet)
-        if (supplierVKN !== INOKAS_VKN && customerVKN !== INOKAS_VKN) {
-            throw new Error(`Güvenlik İhlali: Bu fatura İNOKAS'a ait değil! (Gelen VKN'ler: ${supplierVKN} - ${customerVKN})`);
-        }
-
-        // 2- Yanlış sekmeye yanlış fatura mı yükleniyor?
-        if (currentView === 'gelen' && customerVKN !== INOKAS_VKN) {
-            throw new Error("HATA: İnokas'ın KESTİĞİ bir faturayı, 'Gelen' sekmesine yükleyemezsiniz!");
-        }
-        if (currentView === 'giden' && supplierVKN !== INOKAS_VKN) {
-            throw new Error("HATA: İnokas'a KESİLMİŞ bir faturayı, 'Giden' sekmesine yükleyemezsiniz!");
-        }
-
-        // D. Kontrollerden geçtik! Artık yönünü biliyoruz. Asıl verileri (VKN, isim) çekeceğimiz "Karşı Tarafı" belirleyelim:
+        // C. Asıl verileri (VKN, isim) çekeceğimiz "Karşı Tarafı" belirleyelim:
         const party = currentView === 'gelen' ? supplierWrapper : customerWrapper;
 
         // --- COMPANY DATA SCRAPING ---
@@ -452,6 +437,10 @@ function parseUBL(xml) {
                 total_amount_tl: (parseFloat(total) * (parseFloat(kur) || 1)).toFixed(2),
                 notes: notesArray.join('\n')
             },
+            xml_context: {
+                supplier_vkn: supplierVKN,
+                customer_vkn: customerVKN
+            },
             items: []
         };
 
@@ -512,11 +501,41 @@ function parseUBL(xml) {
 // --- HAFIZALI (CACHE) TABLO YENİLEME İŞLEMLERİ ---
 
 let allInvoicesCache = null; // Ana Depomuz (Veriler burada tutulacak)
+const INVOICE_CACHE_KEY = 'inokas_invoices_cache_v1';
+
+function readInvoicesFromSession() {
+    try {
+        const raw = sessionStorage.getItem(INVOICE_CACHE_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : null;
+    } catch (e) {
+        console.warn('Session cache okunamadı:', e);
+        return null;
+    }
+}
+
+function writeInvoicesToSession(invoices) {
+    try {
+        sessionStorage.setItem(INVOICE_CACHE_KEY, JSON.stringify(invoices));
+    } catch (e) {
+        console.warn('Session cache yazılamadı:', e);
+    }
+}
 
 // 1. Ana Garson (SADECE sayfa açıldığında veya "Yenile"ye basıldığında çalışır)
-async function refreshData() {
+async function refreshData(forceFetch = false) {
     const tableBody = document.getElementById('invoiceTableBody');
-    tableBody.innerHTML = '<tr><td colspan="9" class="text-center">Faturalar sunucudan yükleniyor...</td></tr>';
+    if (!forceFetch) {
+        const cachedInvoices = readInvoicesFromSession();
+        if (cachedInvoices !== null) {
+            allInvoicesCache = cachedInvoices;
+            renderCurrentView();
+            return;
+        }
+    }
+
+    tableBody.innerHTML = '<tr><td colspan="11" class="text-center">Faturalar sunucudan yükleniyor...</td></tr>';
 
     try {
         // Parametre vermiyoruz, tüm faturaları (Gelen+Giden) tek seferde istiyoruz
@@ -525,13 +544,14 @@ async function refreshData() {
 
         // Gelen tüm veriyi Kalıcı Hafızaya atıyoruz (İşte Cache burası!)
         allInvoicesCache = await response.json();
+        writeInvoicesToSession(allInvoicesCache);
 
         // Hafızaya alındıktan sonra ekrana basma işini tetikle
         renderCurrentView();
 
     } catch (error) {
         console.error("Tablo Yenileme Hatası:", error);
-        tableBody.innerHTML = '<tr><td colspan="9" class="text-center text-danger">Veriler yüklenirken hata oluştu!</td></tr>';
+        tableBody.innerHTML = '<tr><td colspan="11" class="text-center text-danger">Veriler yüklenirken hata oluştu!</td></tr>';
     }
 }
 
@@ -955,7 +975,7 @@ async function saveInvoiceToDatabase(e) {
 
             alert(result.message || "Fatura başarıyla güncellendi.");
             closeInvoiceModal();
-            refreshData();
+            refreshData(true);
             return;
         } catch (err) {
             console.error("Güncelleme Hatası:", err.message);
@@ -989,6 +1009,7 @@ async function saveInvoiceToDatabase(e) {
             status: status,
             paid_amount: paidAmount
         },
+        xml_context: currentParsedData.xml_context || null,
         items: itemsToSave
     };
 
@@ -1014,7 +1035,7 @@ async function saveInvoiceToDatabase(e) {
         // Başarılı işlem sonrası UI güncellemeleri
         alert(result.message);
         closeInvoiceModal();
-        refreshData();
+        refreshData(true);
 
     } catch (err) {
         console.error("Kayıt Hatası:", err.message);
@@ -1044,7 +1065,7 @@ async function deleteInvoice(id) {
 
         alert("✅ Fatura başarıyla silindi!");
         closeInvoiceDetailModal();   // Görüntüleme penceresini kapat
-        refreshData();               // Listeyi tazeleyelim ki tablo ekranından da silinip uçsun
+        refreshData(true);           // Listeyi tazeleyelim ki tablo ekranından da silinip uçsun
     } catch (err) {
         console.error("Silme hatası:", err);
         alert("Fatura silinirken bir ağ hatası oluştu.");

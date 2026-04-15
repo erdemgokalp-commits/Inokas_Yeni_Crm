@@ -32,6 +32,29 @@ app.get('/', (req, res) => {
 app.post('/api/save-invoice', async (req, res) => {
   try {
     const fullData = req.body; // This is the package coming from faturalar.js
+    const inokasVkn = (process.env.INOKAS_VKN || '').trim();
+
+    // Backend güvenlik kontrolü: XML bağlamı üzerinden fatura yönünü doğrula
+    if (inokasVkn && fullData?.xml_context) {
+      const supplierVkn = String(fullData.xml_context.supplier_vkn || '').trim();
+      const customerVkn = String(fullData.xml_context.customer_vkn || '').trim();
+      const direction = String(fullData?.invoice?.direction || '').toUpperCase();
+
+      if (supplierVkn !== inokasVkn && customerVkn !== inokasVkn) {
+        return res.status(400).json({ error: "Güvenlik hatası: Bu XML İnokas'a ait görünmüyor." });
+      }
+      if (direction === 'INCOMING' && customerVkn !== inokasVkn) {
+        return res.status(400).json({ error: "Hata: Bu fatura 'Gelen' yönüne uygun değil." });
+      }
+      if (direction === 'OUTGOING' && supplierVkn !== inokasVkn) {
+        return res.status(400).json({ error: "Hata: Bu fatura 'Giden' yönüne uygun değil." });
+      }
+    }
+
+    // Karşı firma VKN'si sistem VKN'si ile aynı olamaz
+    if (inokasVkn && String(fullData?.company?.vkn_tckn || '').trim() === inokasVkn) {
+      return res.status(400).json({ error: "Hata: Karşı firma VKN'si ile İnokas VKN'si aynı olamaz." });
+    }
 
     // --- STEP A: UPSERT COMPANY ---
     const { data: companyData, error: companyError } = await supabase
@@ -62,11 +85,36 @@ app.post('/api/save-invoice', async (req, res) => {
       invoice_id: invoiceData.id
     }));
 
-    const { error: itemsError } = await supabase
+    const { data: insertedItems, error: itemsError } = await supabase
       .from('invoice_items')
-      .insert(itemsToSave);
+      .insert(itemsToSave)
+      .select('id, quantity, product_name, sku');
 
     if (itemsError) throw itemsError;
+
+    // --- STEP D: INSERT STOCK MOVEMENTS ---
+    const movementType = invoiceData.direction === 'INCOMING' ? 'IN' : 'OUT';
+    const movementDate = invoiceData.invoice_date;
+    const stockMovementsToSave = (insertedItems || [])
+      .map(item => ({
+        invoice_item_id: item.id,
+        movement_type: movementType,
+        quantity: Math.trunc(Number(item.quantity) || 0),
+        product_name: item.product_name || 'İsimsiz Ürün',
+        sku: item.sku || null,
+        movement_date: movementDate
+      }))
+      .filter(m => m.quantity > 0);
+
+    if (stockMovementsToSave.length > 0) {
+      const { error: stockError } = await supabase
+        .from('stock_movements')
+        .upsert(stockMovementsToSave, {
+          onConflict: 'invoice_item_id,movement_type',
+          ignoreDuplicates: true
+        });
+      if (stockError) throw stockError;
+    }
 
     // If everything worked, send a success message back to the browser
     res.status(200).json({ message: "Fatura başarıyla kaydedildi!" });
@@ -82,6 +130,126 @@ app.post('/api/save-invoice', async (req, res) => {
 
 
 
+
+// 3.5. GET ROUTE: Stok özetini frontend'e gönderir
+app.get('/api/stocks/summary', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('stock_movements')
+      .select('invoice_item_id, product_name, sku, movement_type, quantity');
+
+    if (error) throw error;
+
+    const itemIds = [...new Set((data || []).map(r => r.invoice_item_id).filter(Boolean))];
+    const itemMap = {};
+    const invoiceMap = {};
+
+    if (itemIds.length > 0) {
+      const { data: items, error: itemsErr } = await supabase
+        .from('invoice_items')
+        .select('id, unit_price_cur, invoice_id')
+        .in('id', itemIds);
+      if (itemsErr) throw itemsErr;
+      (items || []).forEach((it) => { itemMap[it.id] = it; });
+
+      const invoiceIds = [...new Set((items || []).map(i => i.invoice_id).filter(Boolean))];
+      if (invoiceIds.length > 0) {
+        const { data: invoices, error: invErr } = await supabase
+          .from('invoices')
+          .select('id, currency, exchange_rate')
+          .in('id', invoiceIds);
+        if (invErr) throw invErr;
+        (invoices || []).forEach((inv) => { invoiceMap[inv.id] = inv; });
+      }
+    }
+
+    const toUnitUsd = (itemId) => {
+      const item = itemMap[itemId];
+      if (!item) return null;
+      const invoice = invoiceMap[item.invoice_id];
+      if (!invoice) return null;
+      const currency = String(invoice.currency || '').toUpperCase();
+      const unitPrice = Number(item.unit_price_cur || 0);
+      if (!(unitPrice > 0)) return null;
+      // Doğru USD dönüşümü için sadece USD fatura birimini kesin kabul ediyoruz.
+      if (currency === 'USD') return unitPrice;
+      return null;
+    };
+
+    const grouped = {};
+    (data || []).forEach((row) => {
+      const key = row.sku ? `SKU:${row.sku}` : `NAME:${row.product_name}`;
+      if (!grouped[key]) {
+        grouped[key] = {
+          product_name: row.product_name,
+          sku: row.sku || null,
+          total_in: 0,
+          total_out: 0,
+          current_stock: 0,
+          total_in_usd: 0,
+          total_out_usd: 0,
+          in_qty_for_avg_usd: 0,
+          out_qty_for_avg_usd: 0,
+          in_unit_usd: null,
+          out_unit_usd: null,
+          stock_usd: null
+        };
+      }
+
+      const qty = Number(row.quantity) || 0;
+      const unitUsd = toUnitUsd(row.invoice_item_id);
+      if (row.movement_type === 'IN') {
+        grouped[key].total_in += qty;
+        if (unitUsd !== null) {
+          grouped[key].total_in_usd += qty * unitUsd;
+          grouped[key].in_qty_for_avg_usd += qty;
+        }
+      }
+      if (row.movement_type === 'OUT') {
+        grouped[key].total_out += qty;
+        if (unitUsd !== null) {
+          grouped[key].total_out_usd += qty * unitUsd;
+          grouped[key].out_qty_for_avg_usd += qty;
+        }
+      }
+      grouped[key].current_stock = grouped[key].total_in - grouped[key].total_out;
+    });
+
+    const summary = Object.values(grouped).map((row) => {
+      const avgInUnitUsd = row.in_qty_for_avg_usd > 0 ? (row.total_in_usd / row.in_qty_for_avg_usd) : null;
+      const avgOutUnitUsd = row.out_qty_for_avg_usd > 0 ? (row.total_out_usd / row.out_qty_for_avg_usd) : null;
+      const stockUsd = avgInUnitUsd !== null ? row.current_stock * avgInUnitUsd : null;
+      return {
+        product_name: row.product_name,
+        sku: row.sku,
+        total_in: row.total_in,
+        total_out: row.total_out,
+        current_stock: row.current_stock,
+        in_unit_usd: avgInUnitUsd,
+        out_unit_usd: avgOutUnitUsd,
+        stock_usd: stockUsd,
+        total_out_usd: row.total_out_usd
+      };
+    }).sort((a, b) => {
+      if (b.current_stock !== a.current_stock) return b.current_stock - a.current_stock;
+      return String(a.product_name || '').localeCompare(String(b.product_name || ''), 'tr');
+    });
+
+    const stats = summary.reduce((acc, row) => {
+      acc.total_in_qty += Number(row.total_in || 0);
+      acc.total_out_qty += Number(row.total_out || 0);
+      acc.current_qty += Number(row.current_stock || 0);
+      acc.stock_usd += Number(row.stock_usd || 0);
+      acc.total_out_usd += Number(row.total_out_usd || 0);
+      return acc;
+    }, { total_in_qty: 0, total_out_qty: 0, current_qty: 0, stock_usd: 0, total_out_usd: 0 });
+
+    res.status(200).json({ data: summary, stats });
+  } catch (err) {
+    console.error("Stok Özet Hatası:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // 3. GET ROUTE: Faturaları veritabanından çekip UI'a gönderen yeni kapımız
 app.get('/api/invoices', async (req, res) => {

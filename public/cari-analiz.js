@@ -1,9 +1,10 @@
 let analysisView = 'suppliers';
 let allInvoices = [];
+const CARI_ANALIZ_CACHE_KEY = 'inokas_cari_analiz_invoices_v1';
 
 document.addEventListener('DOMContentLoaded', async () => {
   setupAnalysisUi();
-  await fetchInvoicesForAnalysis();
+  await fetchInvoicesForAnalysis(false);
   renderCompanyCards();
 });
 
@@ -28,8 +29,36 @@ function switchAnalysisView(view) {
   renderCompanyCards();
 }
 
-async function fetchInvoicesForAnalysis() {
+function readCariAnalizCache() {
+  try {
+    const raw = sessionStorage.getItem(CARI_ANALIZ_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch (e) {
+    console.warn('Cari analiz cache okunamadı:', e);
+    return null;
+  }
+}
+
+function writeCariAnalizCache(invoices) {
+  try {
+    sessionStorage.setItem(CARI_ANALIZ_CACHE_KEY, JSON.stringify(invoices));
+  } catch (e) {
+    console.warn('Cari analiz cache yazılamadı:', e);
+  }
+}
+
+async function fetchInvoicesForAnalysis(forceFetch = false) {
   const emptyState = document.getElementById('analysisEmptyState');
+  if (!forceFetch) {
+    const cached = readCariAnalizCache();
+    if (cached !== null) {
+      allInvoices = cached;
+      return;
+    }
+  }
+
   if (emptyState) {
     emptyState.style.display = 'block';
     emptyState.innerText = 'Rapor verisi yükleniyor...';
@@ -39,6 +68,7 @@ async function fetchInvoicesForAnalysis() {
     const response = await fetch('/api/invoices');
     if (!response.ok) throw new Error('Faturalar çekilemedi');
     allInvoices = await response.json();
+    writeCariAnalizCache(allInvoices);
   } catch (error) {
     console.error('Cari analiz veri çekme hatası:', error);
     allInvoices = [];

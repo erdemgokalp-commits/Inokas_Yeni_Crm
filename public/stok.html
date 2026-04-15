@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="tr">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stok — İnokas CRM</title>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="stok.css">
+</head>
+
+<body>
+  <nav class="topbar">
+    <div class="topbar-left">
+      <a href="/" class="brand">
+        <div class="brand-dot"></div>
+        İnokas <span>CRM</span>
+      </a>
+    </div>
+    <div class="topbar-right">
+      <button class="nav-link">📋 Siparişler</button>
+      <button class="nav-link">📄 Teklifler</button>
+      <a href="/" class="nav-link">💰 Faturalar</a>
+      <button class="nav-link active">📦 Stok</button>
+      <a href="/cari-analiz.html" class="nav-link">📊 Cari Analiz</a>
+      <button class="nav-link logout">🚪 Çıkış</button>
+    </div>
+  </nav>
+
+  <main class="main-container">
+    <header class="page-header">
+      <h1>Stok Özeti</h1>
+      <p>Faturalardan türetilen giriş/çıkış hareketleri</p>
+    </header>
+
+    <section class="stats-grid usd-top">
+      <div class="stat-card stat-card-usd">
+        <label>Depo Stok (USD Bazlı)</label>
+        <h2 id="stat-stock-usd" class="text-primary">$0.00</h2>
+      </div>
+      <div class="stat-card stat-card-usd">
+        <label>Toplam Çıkış (USD Bazlı)</label>
+        <h2 id="stat-out-usd" class="text-danger">$0.00</h2>
+      </div>
+    </section>
+
+    <section class="stats-grid compact">
+      <div class="stat-card">
+        <label>Toplam Ürün</label>
+        <h2 id="stat-product-count">0</h2>
+      </div>
+      <div class="stat-card">
+        <label>Depoya Giren</label>
+        <h2 id="stat-total-in" class="text-success">0</h2>
+      </div>
+      <div class="stat-card">
+        <label>Depodan Çıkan</label>
+        <h2 id="stat-total-out" class="text-danger">0</h2>
+      </div>
+      <div class="stat-card">
+        <label>Eldeki Miktar</label>
+        <h2 id="stat-current" class="text-primary">0</h2>
+      </div>
+    </section>
+
+    <section class="content-card">
+      <div class="toolbar">
+        <input type="text" id="stockSearch" placeholder="Ürün veya SKU ara...">
+        <button class="btn-refresh" id="btnRefreshStocks">🔄 Yenile</button>
+      </div>
+
+      <div class="table-wrap">
+        <table class="stocks-table">
+          <thead>
+            <tr>
+              <th>Ürün</th>
+              <th>SKU</th>
+              <th class="text-right">Giriş</th>
+              <th class="text-right">Çıkış</th>
+              <th class="text-right">Mevcut</th>
+              <th class="text-right">Giriş Birim USD</th>
+              <th class="text-right">Çıkış Birim USD</th>
+              <th class="text-right">Stok USD</th>
+            </tr>
+          </thead>
+          <tbody id="stocksTableBody"></tbody>
+        </table>
+      </div>
+      <div id="stocksEmptyState" class="empty-state">Stok verisi yükleniyor...</div>
+    </section>
+  </main>
+
+  <script src="stok.js"></script>
+</body>
+
+</html>

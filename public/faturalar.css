@@ -84,6 +84,23 @@ body {
 .search-group { display: flex; gap: 10px; }
 .toolbar input, .toolbar select { padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; outline: none; }
 
+/* Filtre kutuları uzun option metnine göre büyümesin */
+.search-group select {
+  width: 140px;
+  min-width: 140px;
+  max-width: 140px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Firma seçimi diğerlerinden biraz daha geniş ama sabit */
+#filterCompany {
+  width: 220px;
+  min-width: 220px;
+  max-width: 220px;
+}
+
 .modern-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
 .modern-table th { background: #f1f5f9; padding: 12px 16px; text-align: left; font-weight: 700; color: var(--text-sub); }
 .modern-table td { padding: 14px 16px; border-bottom: 1px solid var(--border); }

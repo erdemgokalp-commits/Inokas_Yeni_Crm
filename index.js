@@ -121,36 +121,14 @@ app.post('/api/save-invoice', async (req, res) => {
       invoice_id: invoiceData.id
     }));
 
-    const { data: insertedItems, error: itemsError } = await supabase
+    const { error: itemsError } = await supabase
       .from('invoice_items')
       .insert(itemsToSave)
-      .select('id, quantity, product_name, sku');
+      .select('id');
 
     if (itemsError) throw itemsError;
 
-    // --- STEP D: INSERT STOCK MOVEMENTS ---
-    const movementType = invoiceData.direction === 'INCOMING' ? 'IN' : 'OUT';
-    const movementDate = invoiceData.invoice_date;
-    const stockMovementsToSave = (insertedItems || [])
-      .map(item => ({
-        invoice_item_id: item.id,
-        movement_type: movementType,
-        quantity: Math.trunc(Number(item.quantity) || 0),
-        product_name: item.product_name || 'İsimsiz Ürün',
-        sku: item.sku || null,
-        movement_date: movementDate
-      }))
-      .filter(m => m.quantity > 0);
-
-    if (stockMovementsToSave.length > 0) {
-      const { error: stockError } = await supabase
-        .from('stock_movements')
-        .upsert(stockMovementsToSave, {
-          onConflict: 'invoice_item_id,movement_type',
-          ignoreDuplicates: true
-        });
-      if (stockError) throw stockError;
-    }
+    // Stok hareketleri DB trigger'ı tarafından otomatik üretilir.
 
     // If everything worked, send a success message back to the browser
     res.status(200).json({ message: "Fatura başarıyla kaydedildi!" });

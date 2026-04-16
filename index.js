@@ -33,12 +33,42 @@ app.post('/api/save-invoice', async (req, res) => {
   try {
     const fullData = req.body; // This is the package coming from faturalar.js
     const inokasVkn = (process.env.INOKAS_VKN || '').trim();
+    const direction = String(fullData?.invoice?.direction || '').toUpperCase();
+    const submitView = String(fullData?.submit_view || '').trim();
+    const parsedView = String(fullData?.parsed_view || '').trim();
+
+    const viewToDirection = {
+      gelen: 'INCOMING',
+      giden: 'OUTGOING'
+    };
+
+    // Fail-closed: Beklenmeyen payload varsa kayıt yapma
+    if (!['INCOMING', 'OUTGOING'].includes(direction)) {
+      return res.status(400).json({ error: "Hata: Geçersiz fatura yönü." });
+    }
+    if (!submitView || !viewToDirection[submitView]) {
+      return res.status(400).json({ error: "Hata: Geçersiz sekme bilgisi." });
+    }
+    if (viewToDirection[submitView] !== direction) {
+      return res.status(400).json({ error: "Hata: Sekme ile fatura yönü eşleşmiyor." });
+    }
+    if (!parsedView || parsedView !== submitView) {
+      return res.status(400).json({ error: "Hata: XML farklı sekmede parse edilmiş. Lütfen XML'i aktif sekmede tekrar yükleyin." });
+    }
+    if (!fullData?.xml_context) {
+      return res.status(400).json({ error: "Hata: XML doğrulama bağlamı eksik." });
+    }
+    if (!String(fullData?.invoice?.efatura_uuid || '').trim()) {
+      return res.status(400).json({ error: "Hata: XML içinde UUID bulunamadı. Bu fatura kaydedilemez." });
+    }
+    if (!inokasVkn) {
+      return res.status(500).json({ error: "Sunucu yapılandırma hatası: INOKAS_VKN tanımlı değil." });
+    }
 
     // Backend güvenlik kontrolü: XML bağlamı üzerinden fatura yönünü doğrula
     if (inokasVkn && fullData?.xml_context) {
       const supplierVkn = String(fullData.xml_context.supplier_vkn || '').trim();
       const customerVkn = String(fullData.xml_context.customer_vkn || '').trim();
-      const direction = String(fullData?.invoice?.direction || '').toUpperCase();
 
       if (supplierVkn !== inokasVkn && customerVkn !== inokasVkn) {
         return res.status(400).json({ error: "Güvenlik hatası: Bu XML İnokas'a ait görünmüyor." });

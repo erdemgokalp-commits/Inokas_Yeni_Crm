@@ -21,6 +21,7 @@ const ns = {
 
 let currentParsedData = null;
 let currentView = 'gelen';
+let isInvoiceSaveInFlight = false;
 // We use `let` for state values because they can change during runtime but const is not.
 // `currentParsedData` stores parsed XML data temporarily in RAM because ->
 // The user may adjust fields in the UI before saving.
@@ -39,7 +40,7 @@ document.addEventListener('DOMContentLoaded', () => {
         statusEl.addEventListener('change', syncPaidFieldByStatus);
     }
     syncPaidFieldByStatus(); // sayfa açılınca ilk doğru durumu uygula
-    refreshData();
+    refreshData(true);
 
     // Get the invoice form from the page.
     const invoiceForm = document.getElementById('invoiceForm'); // document is global object in JavaScript to present the HTML page.
@@ -414,6 +415,7 @@ function parseUBL(xml) {
 
         // ANA VERİ YAPISINI KURUYORUZ (Döngüden önce olması şart)
         currentParsedData = {
+            parsed_view: currentView,
             company: {
                 vkn_tckn: vkn,
                 name: firmaAdi,
@@ -501,14 +503,33 @@ function parseUBL(xml) {
 // --- HAFIZALI (CACHE) TABLO YENİLEME İŞLEMLERİ ---
 
 let allInvoicesCache = null; // Ana Depomuz (Veriler burada tutulacak)
-const INVOICE_CACHE_KEY = 'inokas_invoices_cache_v1';
+const INVOICE_CACHE_KEY = 'inokas_invoices_cache_v2';
+const INVOICE_CACHE_TTL_MS = 10 * 60 * 1000; // 10 dakika
+
+function normalizeCurrencyCode(code) {
+    const val = String(code || '').trim().toUpperCase();
+    if (val === 'TL') return 'TRY';
+    return val;
+}
 
 function readInvoicesFromSession() {
     try {
         const raw = sessionStorage.getItem(INVOICE_CACHE_KEY);
         if (!raw) return null;
         const parsed = JSON.parse(raw);
-        return Array.isArray(parsed) ? parsed : null;
+
+        // v2 format: { timestamp: number, data: Invoice[] }
+        const ts = Number(parsed?.timestamp) || 0;
+        const data = parsed?.data;
+        if (!Array.isArray(data) || ts <= 0) return null;
+
+        // TTL dolduysa cache'i geçersiz say
+        if ((Date.now() - ts) > INVOICE_CACHE_TTL_MS) {
+            sessionStorage.removeItem(INVOICE_CACHE_KEY);
+            return null;
+        }
+
+        return data;
     } catch (e) {
         console.warn('Session cache okunamadı:', e);
         return null;
@@ -517,7 +538,11 @@ function readInvoicesFromSession() {
 
 function writeInvoicesToSession(invoices) {
     try {
-        sessionStorage.setItem(INVOICE_CACHE_KEY, JSON.stringify(invoices));
+        const payload = {
+            timestamp: Date.now(),
+            data: Array.isArray(invoices) ? invoices : []
+        };
+        sessionStorage.setItem(INVOICE_CACHE_KEY, JSON.stringify(payload));
     } catch (e) {
         console.warn('Session cache yazılamadı:', e);
     }
@@ -577,7 +602,7 @@ function renderCurrentView() {
 
     // C. Kullanıcının Seçtiği Filtreleri Yakalayalım
     const companySelected = document.getElementById('filterCompany').value;
-    const currencySelected = document.getElementById('filterCurrency').value;
+    const currencySelected = normalizeCurrencyCode(document.getElementById('filterCurrency').value);
     const searchText = document.getElementById('mainSearch').value.toLowerCase();
 
     // Seçimlere göre faturaları bir kez daha elekten geçiriyoruz
@@ -589,7 +614,8 @@ function renderCurrentView() {
 
         // 1- Mevcut Şirket & Döviz & Yazı Filtreleri
         const matchCompany = !companySelected || inv.companies?.name === companySelected;
-        const matchCurrency = !currencySelected || inv.currency === currencySelected;
+        const invoiceCurrency = normalizeCurrencyCode(inv.currency);
+        const matchCurrency = !currencySelected || invoiceCurrency === currencySelected;
         const matchSearch = !searchText ||
             (inv.companies?.name && inv.companies.name.toLowerCase().includes(searchText)) ||
             (inv.invoice_no && inv.invoice_no.toLowerCase().includes(searchText));
@@ -909,6 +935,10 @@ function viewInvoiceDetails(id) {
 
 async function saveInvoiceToDatabase(e) {
     e.preventDefault();
+    if (isInvoiceSaveInFlight) {
+        alert("Kaydetme işlemi devam ediyor, lütfen bekleyin.");
+        return;
+    }
     const invoiceId = document.getElementById('f_id')?.value;
 
     // --- Payment normalize + guard ---
@@ -957,6 +987,7 @@ async function saveInvoiceToDatabase(e) {
         };
 
         try {
+            isInvoiceSaveInFlight = true;
             const response = await fetch(`/api/invoices/${invoiceId}`, {
                 method: 'PUT',
                 headers: {
@@ -978,6 +1009,8 @@ async function saveInvoiceToDatabase(e) {
             console.error("Güncelleme Hatası:", err.message);
             alert("Hata oluştu: " + err.message);
             return;
+        } finally {
+            isInvoiceSaveInFlight = false;
         }
     }
 
@@ -1000,6 +1033,8 @@ async function saveInvoiceToDatabase(e) {
 
     // 2. Paketleme: Sunucuya gidecek tek bir obje oluştur
     const payload = {
+        submit_view: currentView,
+        parsed_view: currentParsedData.parsed_view || null,
         company: currentParsedData.company,
         invoice: {
             ...currentParsedData.invoice,
@@ -1011,6 +1046,7 @@ async function saveInvoiceToDatabase(e) {
     };
 
     try {
+        isInvoiceSaveInFlight = true;
         // 3. Gönderim: Tek bir fetch isteği ile backend'e yolla
         const response = await fetch('/api/save-invoice', {
             method: 'POST',
@@ -1043,6 +1079,8 @@ async function saveInvoiceToDatabase(e) {
         } else {
             alert("Hata oluştu: " + err.message);
         }
+    } finally {
+        isInvoiceSaveInFlight = false;
     }
 }
 
@@ -1183,7 +1221,7 @@ function switchView(view) {
     filterMemory[currentView] = {
         search: document.getElementById('mainSearch').value,
         company: document.getElementById('filterCompany').value,
-        currency: document.getElementById('filterCurrency').value,
+        currency: normalizeCurrencyCode(document.getElementById('filterCurrency').value),
         year: document.getElementById('filterYear') ? document.getElementById('filterYear').value : '',
         month: document.getElementById('filterMonth') ? document.getElementById('filterMonth').value : '',
         status: document.getElementById('filterStatus') ? document.getElementById('filterStatus').value : ''
@@ -1197,7 +1235,8 @@ function switchView(view) {
     // 3- YENİ SEKMENİN HAFIZASINI (BAVULUNU) EKRANA GERİ BOŞALT
     const memory = filterMemory[currentView];
     document.getElementById('mainSearch').value = memory.search;
-    document.getElementById('filterCurrency').value = memory.currency;
+    const rememberedCurrency = normalizeCurrencyCode(memory.currency);
+    document.getElementById('filterCurrency').value = rememberedCurrency;
     if (document.getElementById('filterYear')) document.getElementById('filterYear').value = memory.year;
     if (document.getElementById('filterMonth')) document.getElementById('filterMonth').value = memory.month;
     if (document.getElementById('filterStatus')) document.getElementById('filterStatus').value = memory.status;

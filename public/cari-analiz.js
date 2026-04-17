@@ -1,10 +1,12 @@
 let analysisView = 'suppliers';
 let allInvoices = [];
 const CARI_ANALIZ_CACHE_KEY = 'inokas_cari_analiz_invoices_v1';
+const CARI_ANALIZ_CACHE_TTL_MS = 10 * 60 * 1000; // 10 dakika
 
 document.addEventListener('DOMContentLoaded', async () => {
   setupAnalysisUi();
-  await fetchInvoicesForAnalysis(false);
+  const forceFetchOnLoad = shouldForceFetchOnLoad();
+  await fetchInvoicesForAnalysis(forceFetchOnLoad);
   renderCompanyCards();
 });
 
@@ -34,7 +36,15 @@ function readCariAnalizCache() {
     const raw = sessionStorage.getItem(CARI_ANALIZ_CACHE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : null;
+    // Geriye dönük uyumluluk: Eski sürüm direkt array yazıyordu.
+    if (Array.isArray(parsed)) return parsed;
+    if (!parsed || !Array.isArray(parsed.data)) return null;
+    const ts = Number(parsed.ts || 0);
+    if (!ts || (Date.now() - ts) > CARI_ANALIZ_CACHE_TTL_MS) {
+      sessionStorage.removeItem(CARI_ANALIZ_CACHE_KEY);
+      return null;
+    }
+    return parsed.data;
   } catch (e) {
     console.warn('Cari analiz cache okunamadı:', e);
     return null;
@@ -43,10 +53,24 @@ function readCariAnalizCache() {
 
 function writeCariAnalizCache(invoices) {
   try {
-    sessionStorage.setItem(CARI_ANALIZ_CACHE_KEY, JSON.stringify(invoices));
+    sessionStorage.setItem(CARI_ANALIZ_CACHE_KEY, JSON.stringify({
+      ts: Date.now(),
+      data: invoices
+    }));
   } catch (e) {
     console.warn('Cari analiz cache yazılamadı:', e);
   }
+}
+
+function shouldForceFetchOnLoad() {
+  // Kullanıcı browser refresh yaptıysa (F5/Cmd+R), cache'i bypass edip DB'den taze çek.
+  const navEntry = performance.getEntriesByType('navigation')[0];
+  if (navEntry && navEntry.type === 'reload') return true;
+
+  // Bazı tarayıcılarda eski API fallback'i
+  if (performance.navigation && performance.navigation.type === 1) return true;
+
+  return false;
 }
 
 async function fetchInvoicesForAnalysis(forceFetch = false) {

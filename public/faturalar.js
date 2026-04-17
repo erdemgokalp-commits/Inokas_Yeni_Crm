@@ -1,6 +1,6 @@
 // Filtrelerin Sekmelere Özel Hafızası (Her sekme kendi seçimini yazar)
 // index.html içindeki script ?v= ile aynı tut (deploy sonrası hangi bundle çalışıyor görmek için)
-const FATURALAR_BUILD = '20260417-rpc-update-3';
+const FATURALAR_BUILD = '20260417-xml-profile-taxoffice-due';
 console.info('[faturalar] bundle', FATURALAR_BUILD);
 
 const filterMemory = {
@@ -161,6 +161,7 @@ function viewInvoice(id) {
     document.getElementById('f_type').value = inv.invoice_type || 'Ticari';
     document.getElementById('f_date').value = inv.invoice_date || '';
     document.getElementById('f_due_date').value = inv.due_date || '';
+    document.getElementById('f_tax_office').value = inv.companies?.tax_office || '';
     document.getElementById('f_currency').value = inv.currency || 'TL';
     document.getElementById('f_kur').value = inv.exchange_rate || '';
 
@@ -334,6 +335,29 @@ function handleFileUpload(e) {
 
 
 
+/** UBL ProfileID → formdaki Fatura Türü seçimi (Temel / Ticari / e-Arşiv / e-Fatura) */
+function mapProfileIdToFormInvoiceType(profileIdRaw) {
+    const p = (profileIdRaw || '').toString().trim().toUpperCase();
+    if (!p) return 'Ticari';
+    if (p.includes('EARSIV')) return 'e-Arşiv';
+    if (p.includes('TEMELFATURA')) return 'Temel';
+    if (p.includes('TICARIFATURA') || p === 'TICARI') return 'Ticari';
+    return 'e-Fatura';
+}
+
+/** Vade: kök DueDate veya PaymentTerms / PaymentMeans altındaki PaymentDueDate */
+function parseDueDateFromInvoice(xml) {
+    const rootDue = getVal(xml, 'DueDate');
+    if (rootDue) return rootDue.slice(0, 10);
+    const paymentTerms = xml.getElementsByTagNameNS(ns.cac, 'PaymentTerms')[0];
+    const d1 = paymentTerms?.getElementsByTagNameNS(ns.cbc, 'PaymentDueDate')[0]?.textContent?.trim();
+    if (d1) return d1.slice(0, 10);
+    const paymentMeans = xml.getElementsByTagNameNS(ns.cac, 'PaymentMeans')[0];
+    const d2 = paymentMeans?.getElementsByTagNameNS(ns.cbc, 'PaymentDueDate')[0]?.textContent?.trim();
+    if (d2) return d2.slice(0, 10);
+    return '';
+}
+
 function getVal(parent, tagName) {
     if (!parent) return '';
 
@@ -378,7 +402,10 @@ function parseUBL(xml) {
         // 1. Basic Invoice Info
         const f_no = getVal(xml, 'ID'); // invoice number
         const f_date = getVal(xml, 'IssueDate'); // invoice date
-        const f_type = getVal(xml, 'InvoiceTypeCode'); // Temel mi, Ticari mi? (görseldeki seçenekler) doğrusu ai önerisi iade mi satış mı felan kontrol edelim sonra 
+        const profileId = getVal(xml, 'ProfileID');
+        const invoiceTypeCode = getVal(xml, 'InvoiceTypeCode');
+        const formInvoiceType = mapProfileIdToFormInvoiceType(profileId);
+        const f_due_date = parseDueDateFromInvoice(xml);
 
         // 2. DYNAMIC PARTY LOGIC (Determines if we scrape the Sender or Receiver)
         // currentView 'gelen' means the OTHER company is the Supplier (AccountingSupplierParty)
@@ -447,6 +474,12 @@ function parseUBL(xml) {
         const email = contactNode?.getElementsByTagNameNS(ns.cbc, 'ElectronicMail')[0]?.textContent || "";
         const website = party.getElementsByTagNameNS(ns.cbc, 'WebsiteURI')[0]?.textContent || "";
 
+        const taxOffice =
+            party.getElementsByTagNameNS(ns.cac, 'PartyTaxScheme')[0]
+                ?.getElementsByTagNameNS(ns.cac, 'TaxScheme')[0]
+                ?.getElementsByTagNameNS(ns.cbc, 'Name')[0]
+                ?.textContent?.trim() || '';
+
         // 3. FINANCIAL TOTALS & CURRENCY
         const monetaryTotal = xml.getElementsByTagNameNS(ns.cac, 'LegalMonetaryTotal')[0];
         const net = getVal(monetaryTotal, 'TaxExclusiveAmount');
@@ -464,12 +497,16 @@ function parseUBL(xml) {
         const noteNodes = xml.getElementsByTagNameNS(ns.cbc, 'Note');
         const notesArray = Array.from(noteNodes).map(n => n.textContent.trim()).filter(n => n.length > 0);
         if (kur) notesArray.unshift(`💱 Sistem Notu: Fatura kur değeri 1 ${currency} = ${kur} TL olarak okunmuştur.`);
+        if (invoiceTypeCode) notesArray.unshift(`📋 UBL işlem türü (InvoiceTypeCode): ${invoiceTypeCode}`);
 
         // 5. UPDATE THE UI FORM FIELDS
         document.getElementById('f_no').value = f_no;
         document.getElementById('f_date').value = f_date;
+        document.getElementById('f_type').value = formInvoiceType;
+        document.getElementById('f_due_date').value = f_due_date;
         document.getElementById('f_firma').value = firmaAdi;
         document.getElementById('f_vkn').value = vkn;
+        document.getElementById('f_tax_office').value = taxOffice;
         document.getElementById('f_address').value = fullAddress;
         document.getElementById('f_phone').value = phone;
         document.getElementById('f_email').value = email;
@@ -492,6 +529,7 @@ function parseUBL(xml) {
             company: {
                 vkn_tckn: vkn,
                 name: firmaAdi,
+                tax_office: taxOffice,
                 address: fullAddress,
                 phone: phone,
                 email: email,
@@ -504,6 +542,8 @@ function parseUBL(xml) {
                 invoice_no: f_no,
                 direction: currentView === 'gelen' ? 'INCOMING' : 'OUTGOING',
                 invoice_date: f_date,
+                due_date: f_due_date || null,
+                invoice_type: formInvoiceType,
                 currency: currency === 'TRY' ? 'TL' : currency,
                 exchange_rate: parseFloat(kur) || 1.0,
                 total_currency: parseFloat(total),
@@ -1194,6 +1234,7 @@ async function saveInvoiceToDatabase(e) {
             company: {
                 vkn_tckn: document.getElementById('f_vkn')?.value?.trim() || '',
                 name: document.getElementById('f_firma')?.value?.trim() || '',
+                tax_office: document.getElementById('f_tax_office')?.value?.trim() || '',
                 phone: document.getElementById('f_phone')?.value?.trim() || '',
                 email: document.getElementById('f_email')?.value?.trim() || '',
                 website: document.getElementById('f_website')?.value?.trim() || '',
@@ -1247,6 +1288,7 @@ async function saveInvoiceToDatabase(e) {
     const companyFromUi = {
         vkn_tckn: document.getElementById('f_vkn')?.value?.trim() || '',
         name: document.getElementById('f_firma')?.value?.trim() || '',
+        tax_office: document.getElementById('f_tax_office')?.value?.trim() || '',
         phone: document.getElementById('f_phone')?.value?.trim() || '',
         email: document.getElementById('f_email')?.value?.trim() || '',
         website: document.getElementById('f_website')?.value?.trim() || '',

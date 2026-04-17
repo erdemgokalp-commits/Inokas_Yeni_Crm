@@ -313,6 +313,10 @@
             <label>Adres</label>
             <textarea id="f_address" rows="2" placeholder="Mahalle, Sokak, No..."></textarea>
           </div>
+          <div class="form-group span-2">
+            <label>Vergi dairesi</label>
+            <input type="text" id="f_tax_office" class="locked-input" placeholder="Karşı tarafın bağlı olduğu vergi dairesi (XML)">
+          </div>
 
           <div class="form-group span-2">
             <label>Notlar</label>
@@ -453,7 +457,7 @@
   <div id="toast-container"></div>
 
   <!-- ?v= bump on deploy so Railway/browser never serves stale faturalar.js -->
-  <script src="faturalar.js?v=20260417-rpc-update-3"></script>
+  <script src="faturalar.js?v=20260417-xml-profile-taxoffice-due"></script>
 </body>
 
 </html>

@@ -9,6 +9,7 @@
     href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
     rel="stylesheet">
   <link rel="stylesheet" href="stok.css">
+  <link rel="stylesheet" href="nav.css?v=nav-slide-4-gutter">
 </head>
 
 <body>
@@ -20,12 +21,17 @@
       </a>
     </div>
     <div class="topbar-right">
-      <button class="nav-link">📋 Siparişler</button>
-      <button class="nav-link">📄 Teklifler</button>
-      <a href="/" class="nav-link">💰 Faturalar</a>
-      <button class="nav-link active">📦 Stok</button>
-      <a href="/cari-analiz.html" class="nav-link">📊 Cari Analiz</a>
-      <button class="nav-link logout">🚪 Çıkış</button>
+      <div class="nav-cluster">
+        <span class="nav-pill" id="navPill" aria-hidden="true"></span>
+        <div class="nav-links-row" role="navigation" aria-label="Ana menü">
+          <button type="button" class="nav-link" data-nav-id="siparis">📋 Siparişler</button>
+          <button type="button" class="nav-link" data-nav-id="teklif">📄 Teklifler</button>
+          <a href="/" class="nav-link" data-nav-id="faturalar">💰 Faturalar</a>
+          <button type="button" class="nav-link active" data-nav-id="stok">📦 Stok</button>
+          <a href="/cari-analiz.html" class="nav-link" data-nav-id="cari">📊 Cari Analiz</a>
+        </div>
+      </div>
+      <button type="button" class="nav-link nav-link--logout logout">🚪 Çıkış</button>
     </div>
   </nav>
 
@@ -92,6 +98,7 @@
     </section>
   </main>
 
+  <script src="nav-pill.js?v=nav-slide-3-ease"></script>
   <script src="stok.js"></script>
 </body>
 

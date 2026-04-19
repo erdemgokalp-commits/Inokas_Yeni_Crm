@@ -38,11 +38,7 @@ body {
 .brand span { color: var(--primary); }
 .brand-dot { width: 10px; height: 10px; background: var(--primary); border-radius: 50%; }
 
-.nav-link {
-  background: none; border: none; padding: 8px 16px; font-weight: 600; color: var(--text-sub); cursor: pointer; border-radius: 8px; transition: 0.2s;
-}
-.nav-link.active { color: var(--primary); background: var(--accent-light); }
-.nav-link.logout:hover { color: var(--danger); background: #fee2e2; }
+/* Üst menü stilleri: nav.css */
 
 /* --- MAIN LAYOUT --- */
 .main-container { max-width: 1400px; margin: 2rem auto; padding: 0 1rem; }
@@ -257,4 +253,220 @@ body {
   margin-top: 32px !important;
   padding-top: 18px !important;
   padding-bottom: 10px !important;
+}
+
+/* Toplu XML modal — modal-content’a genel background yok; şeffaf kalınca metin overlay üzerinde kayboluyordu */
+.bulk-modal-content {
+  max-width: 920px;
+  width: 94vw;
+  max-height: 90vh;
+  overflow: auto;
+  padding: 1.25rem 1.5rem;
+  border-radius: 16px;
+  background: #ffffff;
+  color: #0f172a;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 24px 48px rgba(15, 23, 42, 0.35);
+}
+
+.bulk-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.bulk-modal-header h2 {
+  font-size: 1.15rem;
+  margin: 0;
+  color: #0f172a;
+  font-weight: 800;
+}
+
+.bulk-modal-header .close-modal {
+  color: #475569;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 8px;
+}
+
+.bulk-modal-header .close-modal:hover {
+  background: #f1f5f9;
+  color: #0f172a;
+}
+
+.bulk-modal-lead {
+  font-size: 0.9rem;
+  color: #334155;
+  margin-bottom: 1rem;
+  line-height: 1.5;
+}
+
+.bulk-modal-lead strong:first-of-type {
+  color: #ea580c;
+  font-weight: 800;
+}
+
+.bulk-modal-lead strong:last-of-type {
+  color: #9333ea;
+  font-weight: 800;
+}
+
+.bulk-file-pick {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 0.75rem;
+}
+
+.bulk-file-hint {
+  font-size: 0.8rem;
+  color: #475569;
+  font-weight: 600;
+}
+
+.bulk-hint {
+  font-size: 0.85rem;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  color: #9a3412;
+  padding: 10px 12px;
+  border-radius: 8px;
+  margin-bottom: 1rem;
+  line-height: 1.4;
+}
+
+.bulk-two-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+@media (max-width: 768px) {
+  .bulk-two-cols {
+    grid-template-columns: 1fr;
+  }
+}
+
+.bulk-col {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fafafa;
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+}
+
+.bulk-col-head {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: #fff;
+  border-radius: 12px 12px 0 0;
+}
+
+.bulk-col-head h3 {
+  font-size: 0.95rem;
+  margin: 0 0 8px 0;
+}
+
+.bulk-col-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.bulk-mini {
+  font-size: 0.8rem;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.bulk-col-body {
+  flex: 1;
+  padding: 8px;
+  overflow-y: auto;
+  max-height: 280px;
+}
+
+.bulk-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.85rem;
+}
+
+.bulk-row-check {
+  flex-shrink: 0;
+  padding-top: 2px;
+}
+
+.bulk-row-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.bulk-row-title {
+  font-weight: 600;
+  color: var(--text-main);
+  word-break: break-word;
+}
+
+.bulk-row-sub {
+  font-size: 0.75rem;
+  color: var(--text-sub);
+  margin-top: 2px;
+}
+
+.btn-xs {
+  padding: 2px 8px;
+  font-size: 0.75rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #fff;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.btn-xs:hover {
+  background: #fee2e2;
+  border-color: #fecaca;
+  color: #b91c1c;
+}
+
+.bulk-empty {
+  font-size: 0.85rem;
+  color: var(--text-sub);
+  text-align: center;
+  padding: 1.5rem;
+}
+
+.bulk-failed-box {
+  margin-bottom: 1rem;
+}
+
+.bulk-failed-inner {
+  font-size: 0.8rem;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+  padding: 10px 12px;
+  border-radius: 8px;
+  line-height: 1.45;
+}
+
+.bulk-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border);
 }

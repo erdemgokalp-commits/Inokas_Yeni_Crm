@@ -1,6 +1,6 @@
 // Filtrelerin Sekmelere Özel Hafızası (Her sekme kendi seçimini yazar)
 // index.html içindeki script ?v= ile aynı tut (deploy sonrası hangi bundle çalışıyor görmek için)
-const FATURALAR_BUILD = '20260417-xml-profile-taxoffice-due';
+const FATURALAR_BUILD = '20260419-inokas-vkn-page-inject';
 console.info('[faturalar] bundle', FATURALAR_BUILD);
 
 const filterMemory = {
@@ -21,7 +21,21 @@ const ns = {
 // cbc = basic values (ID, Date, Amount, Name, etc.)
 // cac = aggregate structures (Party, Address, TaxTotal, InvoiceLine, etc.)
 
-
+/**
+ * XML’deki “ürün kodu” bilgisini okur; `invoice_items.product_code` alanına yazılır.
+ * Öncelik: satıcı ürün kodu → yoksa standart kimlik (ör. barkod/GTIN).
+ * - cac:Item/cac:SellersItemIdentification/cbc:ID
+ * - cac:Item/cac:StandardItemIdentification/cbc:ID
+ */
+function parseProductCodeForSku(itemNode) {
+    if (!itemNode) return '';
+    const seller = itemNode.getElementsByTagNameNS(ns.cac, 'SellersItemIdentification')[0]
+        ?.getElementsByTagNameNS(ns.cbc, 'ID')[0]?.textContent;
+    const standard = itemNode.getElementsByTagNameNS(ns.cac, 'StandardItemIdentification')[0]
+        ?.getElementsByTagNameNS(ns.cbc, 'ID')[0]?.textContent;
+    const t = (v) => String(v ?? '').trim();
+    return t(seller) || t(standard) || '';
+}
 
 let currentParsedData = null;
 let currentView = 'gelen';
@@ -162,15 +176,15 @@ function viewInvoice(id) {
     document.getElementById('f_date').value = inv.invoice_date || '';
     document.getElementById('f_due_date').value = inv.due_date || '';
     document.getElementById('f_tax_office').value = inv.companies?.tax_office || '';
-    document.getElementById('f_currency').value = inv.currency || 'TL';
-    document.getElementById('f_kur').value = inv.exchange_rate || '';
+    document.getElementById('f_currency').value = invCurrencySelectValue(inv) || inv.currency || 'TL';
+    document.getElementById('f_kur').value = inv.calculation_rate ?? inv.exchange_rate ?? '';
 
     document.getElementById('f_status').value = (inv.status || 'unpaid').toLowerCase();
-    document.getElementById('f_paid').value = inv.paid_amount || '';
+    document.getElementById('f_paid').value = invPaidAmountSrc(inv);
 
-    document.getElementById('f_net').value = inv.net_amount_tl || '';
-    document.getElementById('f_tax').value = inv.tax_amount_tl || '';
-    document.getElementById('f_total').value = inv.total_amount_tl || '';
+    document.getElementById('f_net').value = invNetForForm(inv);
+    document.getElementById('f_tax').value = invTaxForForm(inv);
+    document.getElementById('f_total').value = invPayableForForm(inv);
     document.getElementById('f_notes').value = inv.notes || '';
     syncPaidFieldByStatus();
 
@@ -205,7 +219,8 @@ function viewInvoice(id) {
                 item.quantity || 1, 
                 item.unit_price_cur || 0, 
                 item.total_price_cur || 0, 
-                item.tax_rate || 20
+                item.tax_rate || 20,
+                item.product_code || item.sku || ''
             );
         });
     } else {
@@ -397,215 +412,547 @@ function getVal(parent, tagName) {
 
 
 
+
+
+/**
+ * UBL XML → kayıt paketi (DOM'a dokunmaz). viewKey: 'gelen' | 'giden'
+ */
+function buildInvoicePayloadFromXml(xml, viewKey) {
+    const f_no = getVal(xml, 'ID');
+    const f_date = getVal(xml, 'IssueDate');
+    const profileId = getVal(xml, 'ProfileID');
+    const invoiceTypeCode = getVal(xml, 'InvoiceTypeCode');
+    const formInvoiceType = mapProfileIdToFormInvoiceType(profileId);
+    const f_due_date = parseDueDateFromInvoice(xml);
+
+    const supplierWrapper = xml.getElementsByTagNameNS(ns.cac, 'AccountingSupplierParty')[0]?.getElementsByTagNameNS(ns.cac, 'Party')[0];
+    const customerWrapper = xml.getElementsByTagNameNS(ns.cac, 'AccountingCustomerParty')[0]?.getElementsByTagNameNS(ns.cac, 'Party')[0];
+
+    if (!supplierWrapper || !customerWrapper) throw new Error("Gönderen veya Alıcı firma bilgisi eksik!");
+
+    const getVknHizli = (partyNode) => {
+        let foundVkn = "";
+        const ids = partyNode.getElementsByTagNameNS(ns.cac, 'PartyIdentification');
+        for (let i = 0; i < ids.length; i++) {
+            const scheme = ids[i].getElementsByTagNameNS(ns.cbc, 'ID')[0]?.getAttribute('schemeID');
+            if (scheme === 'VKN' || scheme === 'TCKN') { foundVkn = ids[i].getElementsByTagNameNS(ns.cbc, 'ID')[0].textContent; break; }
+        }
+        return foundVkn;
+    };
+
+    const supplierVKN = getVknHizli(supplierWrapper);
+    const customerVKN = getVknHizli(customerWrapper);
+
+    const party = viewKey === 'gelen' ? supplierWrapper : customerWrapper;
+
+    const rawOrgName =
+        party.getElementsByTagNameNS(ns.cac, 'PartyName')[0]?.getElementsByTagNameNS(ns.cbc, 'Name')[0]?.textContent ||
+        party.getElementsByTagNameNS(ns.cbc, 'RegistrationName')[0]?.textContent ||
+        '';
+    const personNode = party.getElementsByTagNameNS(ns.cac, 'Person')[0];
+    const firstN = personNode?.getElementsByTagNameNS(ns.cbc, 'FirstName')[0]?.textContent?.trim() || '';
+    const lastN = personNode?.getElementsByTagNameNS(ns.cbc, 'FamilyName')[0]?.textContent?.trim() || '';
+    const fromPerson = [firstN, lastN].filter(Boolean).join(' ').trim();
+    const firmaAdi = (rawOrgName || '').trim() || fromPerson || 'Bilinmeyen Firma';
+
+    let vkn = "";
+    const idNodes = party.getElementsByTagNameNS(ns.cac, 'PartyIdentification');
+    for (let i = 0; i < idNodes.length; i++) {
+        const idNode = idNodes[i].getElementsByTagNameNS(ns.cbc, 'ID')[0];
+        const scheme = idNode?.getAttribute('schemeID');
+        if (scheme === 'VKN' || scheme === 'TCKN') {
+            vkn = idNode.textContent;
+            break;
+        }
+    }
+
+    const addrNode = party.getElementsByTagNameNS(ns.cac, 'PostalAddress')[0];
+    const street = addrNode?.getElementsByTagNameNS(ns.cbc, 'StreetName')[0]?.textContent || "";
+    const bldg = addrNode?.getElementsByTagNameNS(ns.cbc, 'BuildingNumber')[0]?.textContent || "";
+    const citySub = addrNode?.getElementsByTagNameNS(ns.cbc, 'CitySubdivisionName')[0]?.textContent || "";
+    const city = addrNode?.getElementsByTagNameNS(ns.cbc, 'CityName')[0]?.textContent || "";
+    const fullAddress = `${street} No:${bldg} ${citySub} / ${city}`.trim();
+
+    const contactNode = party.getElementsByTagNameNS(ns.cac, 'Contact')[0];
+    const phone = contactNode?.getElementsByTagNameNS(ns.cbc, 'Telephone')[0]?.textContent || "";
+    const email = contactNode?.getElementsByTagNameNS(ns.cbc, 'ElectronicMail')[0]?.textContent || "";
+    const website = contactNode?.getElementsByTagNameNS(ns.cbc, 'WebsiteURI')[0]?.textContent || "";
+
+    const taxOffice =
+        party.getElementsByTagNameNS(ns.cac, 'PartyTaxScheme')[0]
+            ?.getElementsByTagNameNS(ns.cac, 'TaxScheme')[0]
+            ?.getElementsByTagNameNS(ns.cbc, 'Name')[0]
+            ?.textContent?.trim() || '';
+
+    const monetaryTotal = xml.getElementsByTagNameNS(ns.cac, 'LegalMonetaryTotal')[0];
+    if (!monetaryTotal) throw new Error("HATA: LegalMonetaryTotal bulunamadı.");
+
+    const taxTotalNode = xml.getElementsByTagNameNS(ns.cac, 'TaxTotal')[0];
+    const currencyNode = monetaryTotal.getElementsByTagNameNS(ns.cbc, 'PayableAmount')[0];
+    const payableCurrencyId = (currencyNode ? currencyNode.getAttribute('currencyID') : 'TRY') || 'TRY';
+
+    const exchangeRateNode = xml.getElementsByTagNameNS(ns.cac, 'PricingExchangeRate')[0];
+    const sourceFromRate = exchangeRateNode?.getElementsByTagNameNS(ns.cbc, 'SourceCurrencyCode')[0]?.textContent?.trim() || '';
+    const targetFromRate = exchangeRateNode?.getElementsByTagNameNS(ns.cbc, 'TargetCurrencyCode')[0]?.textContent?.trim() || '';
+    const kur = exchangeRateNode ? exchangeRateNode.getElementsByTagNameNS(ns.cbc, 'CalculationRate')[0]?.textContent : "";
+    const calculationRate = (() => {
+        const r = parseFloat(kur);
+        return Number.isFinite(r) && r > 0 ? r : 1;
+    })();
+
+    const baseIso = (sourceFromRate || payableCurrencyId || 'TRY').toUpperCase();
+    const targetIso = (targetFromRate || 'TRY').toUpperCase();
+    const currencyRaw = baseIso;
+
+    const netCur = parseFloat(getVal(monetaryTotal, 'TaxExclusiveAmount')) || 0;
+    const payableCur = parseFloat(getVal(monetaryTotal, 'PayableAmount')) || 0;
+    const taxInclusiveRaw = getVal(monetaryTotal, 'TaxInclusiveAmount');
+    let taxCur = taxTotalNode ? parseFloat(getVal(taxTotalNode, 'TaxAmount') || '0') : NaN;
+    if (!Number.isFinite(taxCur)) taxCur = payableCur - netCur;
+    let taxInclusiveCur = taxInclusiveRaw !== ''
+        ? parseFloat(taxInclusiveRaw)
+        : (netCur + taxCur);
+    if (!Number.isFinite(taxInclusiveCur)) taxInclusiveCur = netCur + taxCur;
+
+    const invCurrencyUi = baseIso === 'TRY' ? 'TL' : baseIso;
+
+    const paymentMeans = xml.getElementsByTagNameNS(ns.cac, 'PaymentMeans')[0];
+    const paymentInstructionNote = paymentMeans?.getElementsByTagNameNS(ns.cbc, 'InstructionNote')[0]?.textContent?.trim() || null;
+
+    const netTl = netCur * calculationRate;
+    const taxTl = taxCur * calculationRate;
+    const payableTl = payableCur * calculationRate;
+
+    const noteNodes = xml.getElementsByTagNameNS(ns.cbc, 'Note');
+    const notesArray = Array.from(noteNodes).map(n => n.textContent.trim()).filter(n => n.length > 0);
+    if (kur) {
+        const tgtLabel = targetIso === 'TRY' ? 'TL' : targetIso;
+        notesArray.unshift(`💱 Sistem Notu: 1 ${currencyRaw} = ${kur} ${tgtLabel} (UBL Source→Target kur).`);
+    }
+    if (invoiceTypeCode) notesArray.unshift(`📋 UBL işlem türü (InvoiceTypeCode): ${invoiceTypeCode}`);
+
+    const lines = xml.getElementsByTagNameNS(ns.cac, 'InvoiceLine');
+    const items = [];
+
+    Array.from(lines).forEach(line => {
+        const itemNode = line.getElementsByTagNameNS(ns.cac, 'Item')[0];
+        const name = itemNode.getElementsByTagNameNS(ns.cbc, 'Description')[0]?.textContent ||
+            itemNode.getElementsByTagNameNS(ns.cbc, 'Name')[0]?.textContent ||
+            'İsimsiz Ürün';
+        const sku = parseProductCodeForSku(itemNode);
+        const qty = getVal(line, 'InvoicedQuantity');
+        const priceNode = line.getElementsByTagNameNS(ns.cac, 'Price')[0];
+        const price = priceNode ? priceNode.getElementsByTagNameNS(ns.cbc, 'PriceAmount')[0]?.textContent : 0;
+        const lineTotal = getVal(line, 'LineExtensionAmount');
+        const taxSubtotal = line.getElementsByTagNameNS(ns.cac, 'TaxTotal')[0]?.getElementsByTagNameNS(ns.cac, 'TaxSubtotal')[0];
+        const taxRate = taxSubtotal ? parseInt(taxSubtotal.getElementsByTagNameNS(ns.cbc, 'Percent')[0]?.textContent) : 20;
+
+        items.push({
+            product_name: name,
+            product_code: sku || null,
+            quantity: parseFloat(qty),
+            unit_code: 'ADET',
+            unit_price_cur: parseFloat(price),
+            total_price_cur: parseFloat(lineTotal),
+            tax_rate: taxRate,
+            currency: invCurrencyUi
+        });
+    });
+
+    return {
+        parsed_view: viewKey,
+        company: {
+            vkn_tckn: vkn,
+            name: firmaAdi,
+            tax_office: taxOffice,
+            address: fullAddress,
+            phone: phone,
+            email: email,
+            website: website,
+            is_supplier: viewKey === 'gelen',
+            is_client: viewKey === 'giden'
+        },
+        invoice: {
+            efatura_uuid: xml.getElementsByTagNameNS(ns.cbc, 'UUID')[0]?.textContent,
+            invoice_no: f_no,
+            direction: viewKey === 'gelen' ? 'INCOMING' : 'OUTGOING',
+            invoice_date: f_date,
+            due_date: f_due_date || null,
+            payment_due_date: f_due_date || null,
+            payment_instruction_note: paymentInstructionNote,
+            invoice_type: formInvoiceType,
+            currency: invCurrencyUi,
+            base_currency: baseIso,
+            target_currency: targetIso,
+            calculation_rate: calculationRate,
+            total_tax_exclusive_cur: netCur,
+            total_tax_inclusive_cur: taxInclusiveCur,
+            payable_amount_cur: payableCur,
+            total_tax_exclusive_tl: netTl,
+            tax_amount_tl: taxTl,
+            payable_amount_tl: payableTl,
+            notes: notesArray.join('\n')
+        },
+        xml_context: {
+            supplier_vkn: supplierVKN,
+            customer_vkn: customerVKN
+        },
+        items,
+        _kurXml: kur || ''
+    };
+}
+
+function applyParsedPayloadToForm(pack) {
+    const inv = pack.invoice;
+    const co = pack.company;
+    document.getElementById('f_no').value = inv.invoice_no || '';
+    document.getElementById('f_date').value = inv.invoice_date || '';
+    document.getElementById('f_type').value = inv.invoice_type || 'Ticari';
+    document.getElementById('f_due_date').value = inv.due_date || '';
+    document.getElementById('f_firma').value = co.name || '';
+    document.getElementById('f_vkn').value = co.vkn_tckn || '';
+    document.getElementById('f_tax_office').value = co.tax_office || '';
+    document.getElementById('f_address').value = co.address || '';
+    document.getElementById('f_phone').value = co.phone || '';
+    document.getElementById('f_email').value = co.email || '';
+    document.getElementById('f_website').value = co.website || '';
+    document.getElementById('f_net').value = inv.total_tax_exclusive_cur ?? '';
+    const rate = parseFloat(inv.calculation_rate) || 1;
+    const taxTl = parseFloat(inv.tax_amount_tl);
+    const taxSrc = Number.isFinite(taxTl) && rate > 0 ? taxTl / rate : '';
+    document.getElementById('f_tax').value = taxSrc !== '' && !Number.isNaN(taxSrc) ? taxSrc : '';
+    document.getElementById('f_total').value = inv.payable_amount_cur ?? '';
+    document.getElementById('f_currency').value = inv.currency || 'TL';
+    document.getElementById('f_kur').value = pack._kurXml != null ? pack._kurXml : '';
+    document.getElementById('f_notes').value = inv.notes || '';
+
+    const lineItemsBody = document.getElementById('lineItemsBody');
+    lineItemsBody.innerHTML = '';
+    pack.items.forEach((item) => {
+        addLineItem(
+            item.product_name,
+            item.quantity,
+            item.unit_price_cur,
+            item.total_price_cur,
+            item.tax_rate,
+            item.product_code || ''
+        );
+    });
+}
+
 function parseUBL(xml) {
     try {
-        // 1. Basic Invoice Info
-        const f_no = getVal(xml, 'ID'); // invoice number
-        const f_date = getVal(xml, 'IssueDate'); // invoice date
-        const profileId = getVal(xml, 'ProfileID');
-        const invoiceTypeCode = getVal(xml, 'InvoiceTypeCode');
-        const formInvoiceType = mapProfileIdToFormInvoiceType(profileId);
-        const f_due_date = parseDueDateFromInvoice(xml);
-
-        // 2. DYNAMIC PARTY LOGIC (Determines if we scrape the Sender or Receiver)
-        // currentView 'gelen' means the OTHER company is the Supplier (AccountingSupplierParty)
-        // currentView 'giden' means the OTHER company is the Customer (AccountingCustomerParty)
-        // Not: Asıl güvenlik kontrolü backend'de yapılır.
-
-        // A. Gönderen (Satıcı) ve Alan (Müşteri) Zarfını aynı anda XML'den bulalım
-        const supplierWrapper = xml.getElementsByTagNameNS(ns.cac, 'AccountingSupplierParty')[0]?.getElementsByTagNameNS(ns.cac, 'Party')[0];
-        const customerWrapper = xml.getElementsByTagNameNS(ns.cac, 'AccountingCustomerParty')[0]?.getElementsByTagNameNS(ns.cac, 'Party')[0];
-
-        if (!supplierWrapper || !customerWrapper) throw new Error("Gönderen veya Alıcı firma bilgisi eksik!");
-
-        // B. İkisinin de VKN'sini hızlıca çeken küçük bir ajan (İç fonksiyon)
-        const getVknHizli = (partyNode) => {
-            let foundVkn = "";
-            const ids = partyNode.getElementsByTagNameNS(ns.cac, 'PartyIdentification');
-            for (let i = 0; i < ids.length; i++) {
-                const scheme = ids[i].getElementsByTagNameNS(ns.cbc, 'ID')[0]?.getAttribute('schemeID');
-                if (scheme === 'VKN' || scheme === 'TCKN') { foundVkn = ids[i].getElementsByTagNameNS(ns.cbc, 'ID')[0].textContent; break; }
-            }
-            return foundVkn;
-        };
-
-        const supplierVKN = getVknHizli(supplierWrapper);
-        const customerVKN = getVknHizli(customerWrapper);
-
-        // C. Asıl verileri (VKN, isim) çekeceğimiz "Karşı Tarafı" belirleyelim:
-        const party = currentView === 'gelen' ? supplierWrapper : customerWrapper;
-
-        // --- COMPANY DATA SCRAPING ---
-
-        // A. Firm Name — önce ünvan (PartyName / RegistrationName); boşsa aynı party altında Person ad+soyad
-        const rawOrgName =
-            party.getElementsByTagNameNS(ns.cac, 'PartyName')[0]?.getElementsByTagNameNS(ns.cbc, 'Name')[0]?.textContent ||
-            party.getElementsByTagNameNS(ns.cbc, 'RegistrationName')[0]?.textContent ||
-            '';
-        const personNode = party.getElementsByTagNameNS(ns.cac, 'Person')[0];
-        const firstN = personNode?.getElementsByTagNameNS(ns.cbc, 'FirstName')[0]?.textContent?.trim() || '';
-        const lastN = personNode?.getElementsByTagNameNS(ns.cbc, 'FamilyName')[0]?.textContent?.trim() || '';
-        const fromPerson = [firstN, lastN].filter(Boolean).join(' ').trim();
-        const firmaAdi = (rawOrgName || '').trim() || fromPerson || 'Bilinmeyen Firma';
-
-        // B. VKN/TCKN (The Unique Identifier)
-        let vkn = "";
-        const idNodes = party.getElementsByTagNameNS(ns.cac, 'PartyIdentification');
-        for (let i = 0; i < idNodes.length; i++) {
-            const idNode = idNodes[i].getElementsByTagNameNS(ns.cbc, 'ID')[0];
-            const scheme = idNode?.getAttribute('schemeID');
-            if (scheme === 'VKN' || scheme === 'TCKN') {
-                vkn = idNode.textContent;
-                break;
-            }
-        }
-
-        // C. Address Extraction
-        const addrNode = party.getElementsByTagNameNS(ns.cac, 'PostalAddress')[0];
-        const street = addrNode?.getElementsByTagNameNS(ns.cbc, 'StreetName')[0]?.textContent || "";
-        const bldg = addrNode?.getElementsByTagNameNS(ns.cbc, 'BuildingNumber')[0]?.textContent || "";
-        const citySub = addrNode?.getElementsByTagNameNS(ns.cbc, 'CitySubdivisionName')[0]?.textContent || ""; // county
-        const city = addrNode?.getElementsByTagNameNS(ns.cbc, 'CityName')[0]?.textContent || ""; // city
-        const fullAddress = `${street} No:${bldg} ${citySub} / ${city}`.trim();
-
-        // D. Contact & Website
-        const contactNode = party.getElementsByTagNameNS(ns.cac, 'Contact')[0];
-        const phone = contactNode?.getElementsByTagNameNS(ns.cbc, 'Telephone')[0]?.textContent || "";
-        const email = contactNode?.getElementsByTagNameNS(ns.cbc, 'ElectronicMail')[0]?.textContent || "";
-        const website = party.getElementsByTagNameNS(ns.cbc, 'WebsiteURI')[0]?.textContent || "";
-
-        const taxOffice =
-            party.getElementsByTagNameNS(ns.cac, 'PartyTaxScheme')[0]
-                ?.getElementsByTagNameNS(ns.cac, 'TaxScheme')[0]
-                ?.getElementsByTagNameNS(ns.cbc, 'Name')[0]
-                ?.textContent?.trim() || '';
-
-        // 3. FINANCIAL TOTALS & CURRENCY
-        const monetaryTotal = xml.getElementsByTagNameNS(ns.cac, 'LegalMonetaryTotal')[0];
-        const net = getVal(monetaryTotal, 'TaxExclusiveAmount');
-        const total = getVal(monetaryTotal, 'PayableAmount');
-        const taxTotalNode = xml.getElementsByTagNameNS(ns.cac, 'TaxTotal')[0];
-        const exactTax = taxTotalNode ? taxTotalNode.getElementsByTagNameNS(ns.cbc, 'TaxAmount')[0]?.textContent : (total - net).toFixed(2);
-
-        const currencyNode = monetaryTotal.getElementsByTagNameNS(ns.cbc, 'PayableAmount')[0];
-        const currency = currencyNode ? currencyNode.getAttribute('currencyID') : 'TRY';
-
-        // 4. EXCHANGE RATE & NOTES
-        const exchangeRateNode = xml.getElementsByTagNameNS(ns.cac, 'PricingExchangeRate')[0];
-        const kur = exchangeRateNode ? exchangeRateNode.getElementsByTagNameNS(ns.cbc, 'CalculationRate')[0]?.textContent : "";
-
-        const noteNodes = xml.getElementsByTagNameNS(ns.cbc, 'Note');
-        const notesArray = Array.from(noteNodes).map(n => n.textContent.trim()).filter(n => n.length > 0);
-        if (kur) notesArray.unshift(`💱 Sistem Notu: Fatura kur değeri 1 ${currency} = ${kur} TL olarak okunmuştur.`);
-        if (invoiceTypeCode) notesArray.unshift(`📋 UBL işlem türü (InvoiceTypeCode): ${invoiceTypeCode}`);
-
-        // 5. UPDATE THE UI FORM FIELDS
-        document.getElementById('f_no').value = f_no;
-        document.getElementById('f_date').value = f_date;
-        document.getElementById('f_type').value = formInvoiceType;
-        document.getElementById('f_due_date').value = f_due_date;
-        document.getElementById('f_firma').value = firmaAdi;
-        document.getElementById('f_vkn').value = vkn;
-        document.getElementById('f_tax_office').value = taxOffice;
-        document.getElementById('f_address').value = fullAddress;
-        document.getElementById('f_phone').value = phone;
-        document.getElementById('f_email').value = email;
-        document.getElementById('f_website').value = website;
-        document.getElementById('f_net').value = net;
-        document.getElementById('f_tax').value = exactTax;
-        document.getElementById('f_total').value = total;
-        document.getElementById('f_currency').value = currency === 'TRY' ? 'TL' : currency;
-        document.getElementById('f_kur').value = kur; // Fills the new input field
-        document.getElementById('f_notes').value = notesArray.join('\n');
-
-        // 6. PARSE LINE ITEMS (PRODUCTS)
-        const lines = xml.getElementsByTagNameNS(ns.cac, 'InvoiceLine');
-        const lineItemsBody = document.getElementById('lineItemsBody');
-        lineItemsBody.innerHTML = '';
-
-        // ANA VERİ YAPISINI KURUYORUZ (Döngüden önce olması şart)
-        currentParsedData = {
-            parsed_view: currentView,
-            company: {
-                vkn_tckn: vkn,
-                name: firmaAdi,
-                tax_office: taxOffice,
-                address: fullAddress,
-                phone: phone,
-                email: email,
-                website: website,
-                is_supplier: currentView === 'gelen',
-                is_client: currentView === 'giden'
-            },
-            invoice: {
-                efatura_uuid: xml.getElementsByTagNameNS(ns.cbc, 'UUID')[0]?.textContent,
-                invoice_no: f_no,
-                direction: currentView === 'gelen' ? 'INCOMING' : 'OUTGOING',
-                invoice_date: f_date,
-                due_date: f_due_date || null,
-                invoice_type: formInvoiceType,
-                currency: currency === 'TRY' ? 'TL' : currency,
-                exchange_rate: parseFloat(kur) || 1.0,
-                total_currency: parseFloat(total),
-                net_amount_tl: (parseFloat(net) * (parseFloat(kur) || 1)).toFixed(2),
-                tax_amount_tl: (parseFloat(exactTax) * (parseFloat(kur) || 1)).toFixed(2),
-                total_amount_tl: (parseFloat(total) * (parseFloat(kur) || 1)).toFixed(2),
-                notes: notesArray.join('\n')
-            },
-            xml_context: {
-                supplier_vkn: supplierVKN,
-                customer_vkn: customerVKN
-            },
-            items: []
-        };
-
-        Array.from(lines).forEach(line => {
-            const itemNode = line.getElementsByTagNameNS(ns.cac, 'Item')[0];
-
-            // DMO XML'leri için Description etiketini Name'den önce öncelikli yapıyoruz
-            const name = itemNode.getElementsByTagNameNS(ns.cbc, 'Description')[0]?.textContent ||
-                itemNode.getElementsByTagNameNS(ns.cbc, 'Name')[0]?.textContent ||
-                'İsimsiz Ürün';
-
-            const sku = itemNode.getElementsByTagNameNS(ns.cac, 'SellersItemIdentification')[0]?.getElementsByTagNameNS(ns.cbc, 'ID')[0]?.textContent || '';
-
-            const qty = getVal(line, 'InvoicedQuantity');
-            const priceNode = line.getElementsByTagNameNS(ns.cac, 'Price')[0];
-            const price = priceNode ? priceNode.getElementsByTagNameNS(ns.cbc, 'PriceAmount')[0]?.textContent : 0;
-            const lineTotal = getVal(line, 'LineExtensionAmount');
-
-            const taxSubtotal = line.getElementsByTagNameNS(ns.cac, 'TaxTotal')[0]?.getElementsByTagNameNS(ns.cac, 'TaxSubtotal')[0];
-            const taxRate = taxSubtotal ? parseInt(taxSubtotal.getElementsByTagNameNS(ns.cbc, 'Percent')[0]?.textContent) : 20;
-
-            // Ekrana sadece isim basıyoruz (Hizalama bozulmasın diye)
-            addLineItem(name, qty, price, lineTotal, taxRate);
-
-            // Veritabanı listesine ikisini de şık bir şekilde ekliyoruz
-            currentParsedData.items.push({
-                product_name: name,
-                sku: sku,
-                quantity: parseFloat(qty),
-                unit: 'Adet',
-                unit_price_cur: parseFloat(price),
-                total_price_cur: parseFloat(lineTotal),
-                tax_rate: taxRate
-            });
-        });
-
-        // 7. SHOW SUCCESS UI
-        showXmlSuccess(firmaAdi, vkn);
-
+        const pack = buildInvoicePayloadFromXml(xml, currentView);
+        currentParsedData = pack;
+        applyParsedPayloadToForm(pack);
+        showXmlSuccess(pack.company.name, pack.company.vkn_tckn);
     } catch (err) {
         console.error("XML Parsing Error:", err);
-        // Eğer bizim fırlattığımız özel bir hataysa direkt onu ekrana bas:
         if (err.message && (err.message.includes("HATA") || err.message.includes("Güvenlik"))) {
             alert(err.message);
         } else {
-            // Gerçekten XML bozuksa genel mesajı ver
             alert("XML dosyası ayrıştırılamadı. Lütfen geçerli bir UBL-TR dosyası seçin.");
         }
     }
 }
+
+// --- TOPLU XML YÜKLEME (aynı kayıt API’si; önizleme/düzenleme yok) ---
+let bulkInokasVkn = null;
+let bulkIncoming = [];
+let bulkOutgoing = [];
+let bulkFailed = [];
+let bulkUploadRunning = false;
+
+function getPartyVknFromNode(partyNode) {
+    if (!partyNode) return '';
+    const ids = partyNode.getElementsByTagNameNS(ns.cac, 'PartyIdentification');
+    for (let i = 0; i < ids.length; i++) {
+        const scheme = ids[i].getElementsByTagNameNS(ns.cbc, 'ID')[0]?.getAttribute('schemeID');
+        if (scheme === 'VKN' || scheme === 'TCKN') {
+            return ids[i].getElementsByTagNameNS(ns.cbc, 'ID')[0]?.textContent?.trim() || '';
+        }
+    }
+    return '';
+}
+
+function getSupplierCustomerVknsFromDoc(xml) {
+    const sw = xml.getElementsByTagNameNS(ns.cac, 'AccountingSupplierParty')[0]?.getElementsByTagNameNS(ns.cac, 'Party')[0];
+    const cw = xml.getElementsByTagNameNS(ns.cac, 'AccountingCustomerParty')[0]?.getElementsByTagNameNS(ns.cac, 'Party')[0];
+    return { supplier: getPartyVknFromNode(sw), customer: getPartyVknFromNode(cw) };
+}
+
+function classifyInvoiceDirection(supplierVkn, customerVkn, inokasVkn) {
+    const s = String(supplierVkn || '').trim();
+    const c = String(customerVkn || '').trim();
+    const io = String(inokasVkn || '').trim();
+    if (!io) return null;
+    if (s !== io && c !== io) return 'NEITHER';
+    if (s === io && c === io) return 'BOTH';
+    if (c === io) return 'INCOMING';
+    if (s === io) return 'OUTGOING';
+    return null;
+}
+
+async function ensureBulkInokasVkn() {
+    if (bulkInokasVkn) return bulkInokasVkn;
+    // Tekli kayıtla aynı kaynak: sunucu .env → ana sayfaya enjekte (GET /); ayrı API şart değil
+    const fromPage = typeof window !== 'undefined' ? window.__INOKAS_VKN__ : '';
+    const direct = String(fromPage || '').trim();
+    if (direct) {
+        bulkInokasVkn = direct;
+        return bulkInokasVkn;
+    }
+    let r;
+    try {
+        r = await fetch('/api/inokas-vkn');
+    } catch (e) {
+        throw new Error('İnokas VKN yok. Sayfayı `node index.js` ile sunulan adresten açın (ör. http://localhost:3000) ve .env içinde INOKAS_VKN olduğundan emin olun; sunucuyu yeniden başlatın.');
+    }
+    if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        throw new Error(
+            j.error ||
+                'İnokas VKN alınamadı. Sunucuda INOKAS_VKN tanımlı mı kontrol edin (.env proje kökünde, sunucuyu yeniden başlatın).'
+        );
+    }
+    const j = await r.json();
+    bulkInokasVkn = String(j.vkn || '').trim();
+    if (!bulkInokasVkn) throw new Error('İnokas VKN boş.');
+    return bulkInokasVkn;
+}
+
+function bulkEscapeHtml(s) {
+    return String(s ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+function updateBulkDirectionHint() {
+    const el = document.getElementById('bulkDirectionHint');
+    if (!el) return;
+    const gelen = currentView === 'gelen';
+    const aktif = gelen ? 'Gelen' : 'Giden';
+    const diger = gelen ? 'Giden' : 'Gelen';
+    el.textContent =
+        `Şu an "${aktif} Faturalar" sekmesindesiniz. "Sisteme yükle" yalnızca ${aktif.toLowerCase()} yönüne uygun XML’leri kaydeder; ` +
+        `"${diger}" sütunundaki dosyalar bu adımda kaydedilmez. Düzenleme yok; kayıttan sonra listeden açıp düzenleyebilirsiniz.`;
+}
+
+function openBulkUploadModal() {
+    bulkIncoming = [];
+    bulkOutgoing = [];
+    bulkFailed = [];
+    const m = document.getElementById('bulkInvoiceModal');
+    const fi = document.getElementById('bulkFileInput');
+    if (fi) fi.value = '';
+    if (m) m.style.display = 'flex';
+    renderBulkLists();
+    updateBulkDirectionHint();
+}
+
+function closeBulkUploadModal() {
+    if (bulkUploadRunning) return;
+    const m = document.getElementById('bulkInvoiceModal');
+    if (m) m.style.display = 'none';
+}
+
+function renderBulkLists() {
+    const inBody = document.getElementById('bulkIncomingBody');
+    const outBody = document.getElementById('bulkOutgoingBody');
+    const failBox = document.getElementById('bulkFailedBox');
+    if (!inBody || !outBody) return;
+
+    function rowHtml(entry, col) {
+        const t = entry.pack.company?.name || entry.fileName;
+        const no = entry.pack.invoice?.invoice_no || '—';
+        return `
+            <div class="bulk-row" data-id="${entry.id}">
+                <label class="bulk-row-check"><input type="checkbox" class="bulk-cb" data-col="${col}"></label>
+                <div class="bulk-row-main">
+                    <div class="bulk-row-title">${bulkEscapeHtml(t)}</div>
+                    <div class="bulk-row-sub">${bulkEscapeHtml(no)} · ${bulkEscapeHtml(entry.fileName)}</div>
+                </div>
+                <button type="button" class="btn btn-xs bulk-row-del" data-id="${entry.id}">✕</button>
+            </div>`;
+    }
+
+    inBody.innerHTML = bulkIncoming.length
+        ? bulkIncoming.map((e) => rowHtml(e, 'in')).join('')
+        : '<div class="bulk-empty">Henüz yok</div>';
+    outBody.innerHTML = bulkOutgoing.length
+        ? bulkOutgoing.map((e) => rowHtml(e, 'out')).join('')
+        : '<div class="bulk-empty">Henüz yok</div>';
+
+    if (failBox) {
+        failBox.innerHTML = bulkFailed.length
+            ? `<div class="bulk-failed-inner"><strong>İşlenemedi (${bulkFailed.length})</strong><br>${bulkFailed.map((f) => `${bulkEscapeHtml(f.fileName)} — ${bulkEscapeHtml(f.reason)}`).join('<br>')}</div>`
+            : '';
+    }
+
+    inBody.querySelectorAll('.bulk-row-del').forEach((btn) => {
+        btn.onclick = () => removeBulkRow(btn.dataset.id);
+    });
+    outBody.querySelectorAll('.bulk-row-del').forEach((btn) => {
+        btn.onclick = () => removeBulkRow(btn.dataset.id);
+    });
+
+    const saIn = document.getElementById('bulkSelAllIn');
+    const saOut = document.getElementById('bulkSelAllOut');
+    if (saIn) saIn.checked = false;
+    if (saOut) saOut.checked = false;
+}
+
+function removeBulkRow(id) {
+    bulkIncoming = bulkIncoming.filter((x) => x.id !== id);
+    bulkOutgoing = bulkOutgoing.filter((x) => x.id !== id);
+    renderBulkLists();
+}
+
+function clearBulkColumn(dir) {
+    if (dir === 'in') bulkIncoming = [];
+    else bulkOutgoing = [];
+    renderBulkLists();
+}
+
+function bulkSelectAllInColumn(dir, checked) {
+    const col = dir === 'in' ? 'in' : 'out';
+    document.querySelectorAll(`.bulk-cb[data-col="${col}"]`).forEach((cb) => { cb.checked = !!checked; });
+}
+
+function bulkDeleteSelectedInColumn(dir) {
+    const col = dir === 'in' ? 'in' : 'out';
+    const toDelete = new Set();
+    document.querySelectorAll(`.bulk-cb[data-col="${col}"]:checked`).forEach((cb) => {
+        const row = cb.closest('.bulk-row');
+        if (row?.dataset.id) toDelete.add(row.dataset.id);
+    });
+    toDelete.forEach((id) => removeBulkRow(id));
+}
+
+async function handleBulkFilePick(ev) {
+    const files = Array.from(ev.target.files || []);
+    if (!files.length) return;
+    try {
+        await ensureBulkInokasVkn();
+    } catch (e) {
+        alert(e.message);
+        return;
+    }
+
+    for (const file of files) {
+        if (!file.name.toLowerCase().endsWith('.xml')) {
+            bulkFailed.push({ fileName: file.name, reason: 'Uzantı .xml değil' });
+            continue;
+        }
+        let text = '';
+        try {
+            text = await file.text();
+        } catch (e) {
+            bulkFailed.push({ fileName: file.name, reason: 'Dosya okunamadı' });
+            continue;
+        }
+        let xmlDoc = null;
+        try {
+            xmlDoc = new DOMParser().parseFromString(text, 'text/xml');
+            if (xmlDoc.getElementsByTagName('parsererror').length) throw new Error('parse');
+        } catch (e) {
+            bulkFailed.push({ fileName: file.name, reason: 'XML çözülemedi' });
+            continue;
+        }
+
+        const { supplier, customer } = getSupplierCustomerVknsFromDoc(xmlDoc);
+        const dir = classifyInvoiceDirection(supplier, customer, bulkInokasVkn);
+        if (dir === 'NEITHER') {
+            bulkFailed.push({ fileName: file.name, reason: 'İnokas satıcı/alıcı olarak görünmüyor' });
+            continue;
+        }
+        if (dir === 'BOTH') {
+            bulkFailed.push({ fileName: file.name, reason: 'VKN çakışması' });
+            continue;
+        }
+
+        const viewKey = dir === 'INCOMING' ? 'gelen' : 'giden';
+        let pack = null;
+        try {
+            pack = buildInvoicePayloadFromXml(xmlDoc, viewKey);
+        } catch (e) {
+            bulkFailed.push({ fileName: file.name, reason: e.message || 'UBL ayrıştırma hatası' });
+            continue;
+        }
+
+        const row = {
+            id: (crypto.randomUUID && crypto.randomUUID()) || `bulk_${Date.now()}_${Math.random()}`,
+            fileName: file.name,
+            pack,
+            direction: dir
+        };
+        if (dir === 'INCOMING') bulkIncoming.push(row);
+        else bulkOutgoing.push(row);
+    }
+
+    renderBulkLists();
+    if (ev.target) ev.target.value = '';
+}
+
+async function executeBulkUpload() {
+    if (bulkUploadRunning) return;
+    const wantGelen = currentView === 'gelen';
+    const queue = wantGelen ? [...bulkIncoming] : [...bulkOutgoing];
+    if (!queue.length) {
+        alert(wantGelen
+            ? 'Sol sütunda (Gelen) kaydedilecek fatura yok.'
+            : 'Sağ sütunda (Giden) kaydedilecek fatura yok.');
+        return;
+    }
+
+    const view = wantGelen ? 'gelen' : 'giden';
+    bulkUploadRunning = true;
+    const succeeded = [];
+    const errors = [];
+
+    for (const entry of queue) {
+        const payload = {
+            submit_view: view,
+            parsed_view: view,
+            company: entry.pack.company,
+            invoice: {
+                ...entry.pack.invoice,
+                status: 'unpaid',
+                paid_amount: 0
+            },
+            xml_context: entry.pack.xml_context,
+            items: entry.pack.items
+        };
+        try {
+            const res = await fetch('/api/save-invoice', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const result = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(result.error || `HTTP ${res.status}`);
+            succeeded.push(entry.id);
+        } catch (e) {
+            const label = entry.pack.invoice?.invoice_no || entry.fileName;
+            errors.push(`${label}: ${e.message}`);
+        }
+    }
+
+    if (wantGelen) bulkIncoming = bulkIncoming.filter((e) => !succeeded.includes(e.id));
+    else bulkOutgoing = bulkOutgoing.filter((e) => !succeeded.includes(e.id));
+
+    bulkUploadRunning = false;
+    renderBulkLists();
+    refreshData(true);
+
+    let msg = `Tamam: ${succeeded.length} fatura kaydedildi.`;
+    if (errors.length) msg += `\n\nHata (${errors.length}):\n${errors.join('\n')}`;
+    alert(msg);
+    if (!bulkIncoming.length && !bulkOutgoing.length && !errors.length) closeBulkUploadModal();
+}
+
 
 
 
@@ -638,6 +985,138 @@ function normalizeCurrencyCode(code) {
     const val = String(code || '').trim().toUpperCase();
     if (val === 'TL') return 'TRY';
     return val;
+}
+
+/** UBL `SourceCurrencyCode` ile hizalı ISO kod (DB `base_currency` / form dövizi) */
+function invBaseCurrencyIso(inv) {
+    const raw = String(inv?.base_currency || inv?.currency || 'TRY').trim().toUpperCase();
+    if (raw === 'TL') return 'TRY';
+    return raw || 'TRY';
+}
+
+/** Tablo / etiket: TRY → TL, aksi halde ISO (USD, EUR…) */
+function invDisplayCurrencyLabel(inv) {
+    const iso = invBaseCurrencyIso(inv);
+    return iso === 'TRY' ? 'TL' : iso;
+}
+
+function formatMoneyDisplay(inv, num) {
+    const n = Number(num) || 0;
+    const iso = invBaseCurrencyIso(inv);
+    if (iso === 'TRY') {
+        return n.toLocaleString('tr-TR', { style: 'currency', currency: 'TRY' });
+    }
+    const label = invDisplayCurrencyLabel(inv);
+    return `${n.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${label}`;
+}
+
+/** DB + eski kayıtlar: TL cinsinden ödenecek tutar */
+function invPayableAmountTl(inv) {
+    const v = inv?.payable_amount_tl ?? inv?.total_amount_tl;
+    return parseFloat(v) || 0;
+}
+
+/** DB + eski kayıtlar: TL matrah */
+function invNetAmountTl(inv) {
+    const v = inv?.total_tax_exclusive_tl ?? inv?.net_amount_tl;
+    return parseFloat(v) || 0;
+}
+
+/** Kur: yeni `calculation_rate`, eski `exchange_rate` */
+function invCalculationRate(inv) {
+    const r = inv?.calculation_rate ?? inv?.exchange_rate;
+    const n = parseFloat(r);
+    return Number.isFinite(n) && n > 0 ? n : 1;
+}
+
+/** Liste / detay / form: kaynak para (SourceCurrency) cinsinden tutarlar */
+function invNetAmountSrc(inv) {
+    const c = parseFloat(inv?.total_tax_exclusive_cur);
+    if (Number.isFinite(c)) return c;
+    return invNetAmountTl(inv) / invCalculationRate(inv);
+}
+
+function invTaxAmountSrc(inv) {
+    const tl = parseFloat(inv?.tax_amount_tl);
+    if (Number.isFinite(tl) && tl >= 0) return tl / invCalculationRate(inv);
+    return Math.max(0, invPayableAmountSrc(inv) - invNetAmountSrc(inv));
+}
+
+function invPayableAmountSrc(inv) {
+    const c = parseFloat(inv?.payable_amount_cur);
+    if (Number.isFinite(c) && c >= 0) return c;
+    return invPayableAmountTl(inv) / invCalculationRate(inv);
+}
+
+function invPaidAmountSrc(inv) {
+    const paidTl = parseFloat(inv?.paid_amount) || 0;
+    return paidTl / invCalculationRate(inv);
+}
+
+function invRemainingAmountSrc(inv) {
+    return Math.max(invPayableAmountSrc(inv) - invPaidAmountSrc(inv), 0);
+}
+
+function invCurrencySelectValue(inv) {
+    return invDisplayCurrencyLabel(inv);
+}
+
+/** Formda gösterilecek kaynak para tutarları (önce cur kolonları, yoksa eski TL kolonları) */
+function invNetForForm(inv) {
+    const cur = inv?.total_tax_exclusive_cur;
+    if (cur != null && cur !== '') {
+        const n = parseFloat(cur);
+        if (!Number.isNaN(n)) return n;
+    }
+    const leg = parseFloat(inv?.net_amount_tl);
+    return Number.isNaN(leg) ? '' : leg;
+}
+
+function invTaxForForm(inv) {
+    const tl = parseFloat(inv?.tax_amount_tl);
+    const rate = invCalculationRate(inv);
+    if (inv?.total_tax_exclusive_cur != null && inv?.total_tax_exclusive_cur !== '' && rate > 0 && !Number.isNaN(tl)) {
+        return tl / rate;
+    }
+    return Number.isNaN(tl) ? '' : tl;
+}
+
+function invPayableForForm(inv) {
+    const cur = inv?.payable_amount_cur;
+    if (cur != null && cur !== '') {
+        const n = parseFloat(cur);
+        if (!Number.isNaN(n)) return n;
+    }
+    const leg = parseFloat(inv?.total_amount_tl);
+    return Number.isNaN(leg) ? '' : leg;
+}
+
+/**
+ * Ekrandan fatura dövizi tutarlarını okur; TL karşılıklarını `calculation_rate` ile üretir (DB şemasına uygun).
+ */
+function readInvoiceFinancialsFromForm() {
+    const fCur = document.getElementById('f_currency')?.value?.trim() || 'TL';
+    const baseIso = fCur === 'TL' ? 'TRY' : fCur;
+    const rateRaw = parseFloat(document.getElementById('f_kur')?.value);
+    const calculationRate = Number.isFinite(rateRaw) && rateRaw > 0 ? rateRaw : 1;
+
+    const netCur = parseFloat(document.getElementById('f_net')?.value) || 0;
+    const taxCur = parseFloat(document.getElementById('f_tax')?.value) || 0;
+    const payableCur = parseFloat(document.getElementById('f_total')?.value) || 0;
+    const inclusiveCur = netCur + taxCur;
+
+    return {
+        currency: fCur,
+        base_currency: baseIso,
+        target_currency: 'TRY',
+        calculation_rate: calculationRate,
+        total_tax_exclusive_cur: netCur,
+        total_tax_inclusive_cur: inclusiveCur,
+        payable_amount_cur: payableCur,
+        total_tax_exclusive_tl: netCur * calculationRate,
+        tax_amount_tl: taxCur * calculationRate,
+        payable_amount_tl: payableCur * calculationRate
+    };
 }
 
 
@@ -866,7 +1345,7 @@ function updateSummaryCards(invoices) {
 
     const uniqueCompanies = new Set();
     invoices.forEach(inv => {
-        const total = parseFloat(inv.total_amount_tl) || 0;
+        const total = invPayableAmountTl(inv);
         const paid = parseFloat(inv.paid_amount) || 0;
         const status = (inv.status || 'unpaid').toLowerCase();
         const remaining = Math.max(total - paid, 0);
@@ -984,9 +1463,11 @@ function renderInvoiceTable(invoices) {
         if (inv.status === 'paid') statusHtml = '<span class="status-badge success">Ödendi</span>';
         else if (inv.status === 'partial') statusHtml = '<span class="status-badge info">Kısmi</span>';
 
-        const totalAmount = parseFloat(inv.total_amount_tl) || 0;
-        const paidAmount = parseFloat(inv.paid_amount) || 0;
-        const remainingAmount = Math.max(totalAmount - paidAmount, 0);
+        const netSrc = invNetAmountSrc(inv);
+        const taxSrc = invTaxAmountSrc(inv);
+        const totalSrc = invPayableAmountSrc(inv);
+        const paidSrc = invPaidAmountSrc(inv);
+        const remainingSrc = invRemainingAmountSrc(inv);
 
         // Gelen/Giden durumuna göre Gönderen ve Alıcıyı belirliyoruz
         let senderName = "";
@@ -1007,17 +1488,14 @@ function renderInvoiceTable(invoices) {
             <td><strong>${receiverName}</strong></td>
             <td>${inv.invoice_date}</td>
             <td>${inv.due_date || '-'}</td>
-            <td class="text-right">${Number(inv.net_amount_tl).toLocaleString('tr-TR', { style: 'currency', currency: 'TRY' })}</td>
-            <td class="text-right">${Number(inv.tax_amount_tl).toLocaleString('tr-TR', { style: 'currency', currency: 'TRY' })}</td>
-            <td class="text-right"><strong>${totalAmount.toLocaleString('tr-TR', { style: 'currency', currency: 'TRY' })}</strong></td>
-            <td class="text-right text-success">${paidAmount.toLocaleString('tr-TR', { style: 'currency', currency: 'TRY' })}</td>
-            <td class="text-right text-danger">${remainingAmount.toLocaleString('tr-TR', { style: 'currency', currency: 'TRY' })}</td>
+            <td class="text-right">${formatMoneyDisplay(inv, netSrc)}</td>
+            <td class="text-right">${formatMoneyDisplay(inv, taxSrc)}</td>
+            <td class="text-right"><strong>${formatMoneyDisplay(inv, totalSrc)}</strong></td>
+            <td class="text-right text-success">${formatMoneyDisplay(inv, paidSrc)}</td>
+            <td class="text-right text-danger">${formatMoneyDisplay(inv, remainingSrc)}</td>
             <td>${statusHtml}</td>
         `;
         tableBody.appendChild(row);
-        // Tabloyu çizerken önce hemen kartları da hızlıca hesapla
-        updateSummaryCards(invoices);
-
     });
 }
 
@@ -1033,25 +1511,8 @@ function renderInvoiceTable(invoices) {
 
 
 
-// --- SADECE OKUNABİLİR ŞIK FATURA DETAY PANELİ KONTROLLERİ ---
-
-function closeInvoiceDetailModal() {
-    document.getElementById('invoiceDetailModal').style.display = 'none';
-}
 
 
-
-
-
-
-
-
-
-
-
-
-
-// --- SADECE OKUNABİLİR ŞIK FATURA DETAY PANELİ KONTROLLERİ ---
 function closeInvoiceDetailModal() {
     document.getElementById('invoiceDetailModal').style.display = 'none';
 }
@@ -1079,29 +1540,25 @@ function viewInvoiceDetails(id) {
     document.getElementById('detail_date').innerText = inv.invoice_date ? new Date(inv.invoice_date).toLocaleDateString('tr-TR') : '-';
     document.getElementById('detail_due_date').innerText = inv.due_date ? new Date(inv.due_date).toLocaleDateString('tr-TR') : '-';
 
-    // Paraları formatla
-    const currency = inv.currency || 'TL';
-    const cSymbol = currency === 'TL' ? '₺' : currency;
+    const paidAmountSrc = invPaidAmountSrc(inv);
+    const tgtIso = String(inv.target_currency || 'TRY').toUpperCase();
+    const tgtLabel = tgtIso === 'TRY' ? 'TL' : tgtIso;
 
-    // NOT: _tl uzantılı değerler zaten kur ile çarpılmış Türk Lirası karşılıklarıdır!
-    // Bu yüzden yanlarına cSymbol (USD/EUR vb.) değil doğrudan '₺' yazılmalıdır.
-    const totalAmountTl = parseFloat(inv.total_amount_tl) || 0;
-    const paidAmountTl = parseFloat(inv.paid_amount) || 0;
-    const remainingAmountTl = Math.max(totalAmountTl - paidAmountTl, 0);
+    document.getElementById('detail_net').innerText = formatMoneyDisplay(inv, invNetAmountSrc(inv));
+    document.getElementById('detail_tax').innerText = formatMoneyDisplay(inv, invTaxAmountSrc(inv));
+    document.getElementById('detail_total').innerText = formatMoneyDisplay(inv, invPayableAmountSrc(inv));
+    document.getElementById('detail_paid').innerText = formatMoneyDisplay(inv, paidAmountSrc);
+    document.getElementById('detail_remaining').innerText = formatMoneyDisplay(inv, invRemainingAmountSrc(inv));
 
-    document.getElementById('detail_net').innerText = (parseFloat(inv.net_amount_tl) || 0).toLocaleString('tr-TR') + ' ₺';
-    document.getElementById('detail_tax').innerText = (parseFloat(inv.tax_amount_tl) || 0).toLocaleString('tr-TR') + ' ₺';
-    document.getElementById('detail_total').innerText = totalAmountTl.toLocaleString('tr-TR') + ' ₺';
-    document.getElementById('detail_paid').innerText = paidAmountTl.toLocaleString('tr-TR') + ' ₺';
-    document.getElementById('detail_remaining').innerText = remainingAmountTl.toLocaleString('tr-TR') + ' ₺';
-
-    document.getElementById('detail_kur').innerText = inv.exchange_rate ? parseFloat(inv.exchange_rate).toLocaleString('tr-TR') + ' ₺' : '-';
+    document.getElementById('detail_kur').innerText = (inv.calculation_rate != null || inv.exchange_rate != null)
+        ? `1 ${invDisplayCurrencyLabel(inv)} = ${invCalculationRate(inv).toLocaleString('tr-TR')} ${tgtLabel}`
+        : '-';
     document.getElementById('detail_notes').innerText = inv.notes || 'Not bulunmuyor.';
 
     // Ödeme Durumunu Şık Balonlara Çevir (Oval)
     let sHtml = '<span style="color:#ef4444; font-weight:700; background:#fee2e2; padding:4px 10px; border-radius:12px;">Ödenmedi</span>';
     if (inv.status === 'paid') sHtml = '<span style="color:#16a34a; font-weight:700; background:#dcfce7; padding:4px 10px; border-radius:12px;">Ödendi</span>';
-    else if (inv.status === 'partial') sHtml = `<span style="color:#d97706; font-weight:700; background:#fef3c7; padding:4px 10px; border-radius:12px;">Kısmi (${(inv.paid_amount || 0).toLocaleString('tr-TR')} ₺)</span>`;
+    else if (inv.status === 'partial') sHtml = `<span style="color:#d97706; font-weight:700; background:#fef3c7; padding:4px 10px; border-radius:12px;">Kısmi (${formatMoneyDisplay(inv, paidAmountSrc)})</span>`;
     document.getElementById('detail_status').innerHTML = sHtml;
 
     // 📦 YENİ: ÜRÜNLER (Line Items) TABLOSUNU ÇİZME
@@ -1115,17 +1572,21 @@ function viewInvoiceDetails(id) {
             tr.style.borderBottom = "1px solid #f1f5f9";
             if (index % 2 !== 0) tr.style.background = "#f8fafc"; // Zebra deseni 🦓
 
+            const code = (item.product_code || item.sku) && String(item.product_code || item.sku).trim()
+                ? String(item.product_code || item.sku).trim()
+                : '—';
             tr.innerHTML = `
                 <td style="padding:10px 15px; font-weight:600;">${item.product_name}</td>
+                <td style="padding:10px 15px; font-size:12px; color:#475569; font-family:ui-monospace,monospace;">${code}</td>
                 <td style="padding:10px 15px; text-align:center;">${item.quantity} ${item.unit || ''}</td>
-                <td style="padding:10px 15px; text-align:right;">${(parseFloat(item.unit_price_cur) || 0).toLocaleString('tr-TR')} ${cSymbol}</td>
+                <td style="padding:10px 15px; text-align:right;">${(parseFloat(item.unit_price_cur) || 0).toLocaleString('tr-TR')} ${invDisplayCurrencyLabel(inv)}</td>
                 <td style="padding:10px 15px; text-align:center;">%${item.tax_rate || 0}</td>
-                <td style="padding:10px 15px; text-align:right; font-weight:700; color:#0f172a;">${(parseFloat(item.total_price_cur) || 0).toLocaleString('tr-TR')} ${cSymbol}</td>
+                <td style="padding:10px 15px; text-align:right; font-weight:700; color:#0f172a;">${(parseFloat(item.total_price_cur) || 0).toLocaleString('tr-TR')} ${invDisplayCurrencyLabel(inv)}</td>
             `;
             tbody.appendChild(tr);
         });
     } else {
-        tbody.innerHTML = `<tr><td colspan="5" style="padding:20px; text-align:center; color:#94a3b8; font-style:italic;">Bu faturaya ait ürün detayı bulunamadı. (Faturayı Yenile'ye basarak yeni veriyi çekebilirsin)</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="6" style="padding:20px; text-align:center; color:#94a3b8; font-style:italic;">Bu faturaya ait ürün detayı bulunamadı. (Faturayı Yenile'ye basarak yeni veriyi çekebilirsin)</td></tr>`;
     }
 
     document.getElementById('invoiceDetailModal').style.display = 'flex';
@@ -1161,55 +1622,62 @@ async function saveInvoiceToDatabase(e) {
     }
     const invoiceId = document.getElementById('f_id')?.value;
 
-    // --- Payment normalize + guard ---
+    // --- Payment: formda tutarlar kaynak para (SourceCurrency); DB'de paid_amount = TL ---
     const statusEl = document.getElementById('f_status');
     const paidEl = document.getElementById('f_paid');
-    const totalEl = document.getElementById('f_total');
 
     const status = (statusEl?.value || 'unpaid').toLowerCase();
-    const totalAmount = parseFloat(totalEl?.value) || 0;
-    let paidAmount = parseFloat(paidEl?.value) || 0;
-
-    // Genel güvenlik: ödenen tutar toplamı geçemez
-    if (paidAmount > totalAmount) {
-        alert("Ödenen tutar, fatura toplamından büyük olamaz.");
-        return;
-    }
+    const fin = readInvoiceFinancialsFromForm();
+    const totalPayableTl = fin.payable_amount_tl;
+    const rawTotal = parseFloat(document.getElementById('f_total')?.value);
+    const payableSrc = (Number.isFinite(rawTotal) && rawTotal > 0)
+        ? rawTotal
+        : (fin.payable_amount_cur > 0 ? fin.payable_amount_cur : totalPayableTl / fin.calculation_rate);
+    let paidSrc = parseFloat(paidEl?.value) || 0;
 
     if (status === 'unpaid') {
-        paidAmount = 0;
-    }
-    else if (status === 'paid') {
-        paidAmount = totalAmount;
-    }
-    else if (status === 'partial') {
-        if (paidAmount <= 0 || paidAmount >= totalAmount) {
-            alert("Kısmi ödeme için tutar 0'dan büyük ve toplamdan küçük olmalı.");
+        paidSrc = 0;
+    } else if (status === 'paid') {
+        paidSrc = payableSrc;
+    } else if (status === 'partial') {
+        if (paidSrc <= 0 || paidSrc >= payableSrc) {
+            alert("Kısmi ödeme için tutar 0'dan büyük ve genel toplamdan küçük olmalı (kaynak para).");
             return;
         }
     }
+
+    const paidAmount = paidSrc * fin.calculation_rate;
+
+    if (paidAmount - totalPayableTl > 0.01) {
+        alert("Ödenen tutar, fatura toplamının TL karşılığını aşamaz.");
+        return;
+    }
+
+    const formCurrency = document.getElementById('f_currency')?.value?.trim() || 'TL';
 
     // Ürün satırlarını ekrandan topla (Güncelleme + Yeni Kayıt akışında ortak kullanılacak)
     const lineRows = document.querySelectorAll('#lineItemsBody tr');
     const itemsFromForm = Array.from(lineRows).map((row) => {
         const cells = row.querySelectorAll('td');
-        const productName = row.querySelector('input[type="text"]')?.value?.trim() || cells[0]?.innerText?.trim() || 'İsimsiz Ürün';
+        const productName = row.querySelector('td:first-child input[type="text"]')?.value?.trim() || cells[0]?.innerText?.trim() || 'İsimsiz Ürün';
         const qtyInput = row.querySelector('input[type="number"]');
         const numberInputs = row.querySelectorAll('input[type="number"]');
-        const qty = parseFloat(qtyInput?.value || cells[1]?.innerText || 0) || 0;
-        const unitPrice = parseFloat(numberInputs[1]?.value || cells[2]?.innerText || 0) || 0;
+        const qty = parseFloat(qtyInput?.value || cells[2]?.innerText || 0) || 0;
+        const unitPrice = parseFloat(numberInputs[1]?.value || cells[3]?.innerText || 0) || 0;
         const lineTotal = qty * unitPrice;
-        const taxRate = parseInt(row.querySelector('.tax-rate-val')?.value || cells[4]?.innerText || 0, 10) || 0;
+        const taxRate = parseFloat(row.querySelector('.tax-rate-val')?.value || cells[5]?.innerText || 0) || 0;
         const internalToggle = row.querySelector('.internal-toggle');
         const isInternal = internalToggle ? !!internalToggle.checked : false;
+        const skuVal = row.querySelector('.line-sku-val')?.value?.trim() || '';
         return {
             product_name: productName,
-            sku: '',
+            product_code: skuVal || null,
             quantity: qty,
-            unit: 'ADET',
+            unit_code: 'ADET',
             unit_price_cur: unitPrice,
             tax_rate: taxRate,
             total_price_cur: lineTotal,
+            currency: formCurrency,
             is_internal: isInternal
         };
     }).filter(item => item.product_name && item.quantity > 0);
@@ -1221,15 +1689,11 @@ async function saveInvoiceToDatabase(e) {
                 status: status,
                 paid_amount: paidAmount,
                 due_date: document.getElementById('f_due_date')?.value || null,
-                exchange_rate: parseFloat(document.getElementById('f_kur')?.value) || 1,
                 notes: document.getElementById('f_notes')?.value || '',
                 invoice_type: document.getElementById('f_type')?.value || 'Ticari',
                 invoice_no: document.getElementById('f_no')?.value || '',
                 invoice_date: document.getElementById('f_date')?.value || null,
-                total_amount_tl: totalAmount,
-                net_amount_tl: parseFloat(document.getElementById('f_net')?.value) || 0,
-                tax_amount_tl: parseFloat(document.getElementById('f_tax')?.value) || 0,
-                currency: document.getElementById('f_currency')?.value || 'TL'
+                ...fin
             },
             company: {
                 vkn_tckn: document.getElementById('f_vkn')?.value?.trim() || '',
@@ -1296,17 +1760,13 @@ async function saveInvoiceToDatabase(e) {
     };
 
     const invoiceFromUi = {
+        ...fin,
         invoice_no: document.getElementById('f_no')?.value || '',
         invoice_type: document.getElementById('f_type')?.value || 'Ticari',
         invoice_date: document.getElementById('f_date')?.value || null,
         due_date: document.getElementById('f_due_date')?.value || null,
-        currency: document.getElementById('f_currency')?.value || 'TL',
-        exchange_rate: parseFloat(document.getElementById('f_kur')?.value) || 1,
         status: status,
         paid_amount: paidAmount,
-        net_amount_tl: parseFloat(document.getElementById('f_net')?.value) || 0,
-        tax_amount_tl: parseFloat(document.getElementById('f_tax')?.value) || 0,
-        total_amount_tl: totalAmount,
         notes: document.getElementById('f_notes')?.value || ''
     };
 
@@ -1471,10 +1931,11 @@ async function fetchTCMBKur() {
 
 
 
-function addLineItem(desc = '', qty = 1, price = 0, total = 0, taxRate = 20) {
+function addLineItem(desc = '', qty = 1, price = 0, total = 0, taxRate = 20, sku = '') {
     const row = document.createElement('tr');
     row.innerHTML = `
         <td><input type="text" value="${desc}" placeholder="Ürün adı"></td>
+        <td><input type="text" class="line-sku-val" placeholder="Ürün kodu" title="XML / sku" style="width:100%;font-size:13px;"></td>
         <td><input type="number" value="${qty}" class="text-center"></td>
         <td><input type="number" value="${price}" step="0.01"></td>
         <td><input type="number" value="${total}" step="0.01" readonly></td>
@@ -1484,9 +1945,11 @@ function addLineItem(desc = '', qty = 1, price = 0, total = 0, taxRate = 20) {
         </td>
         <td><button type="button" class="btn-text" onclick="this.closest('tr').remove()" style="color:var(--danger)">✕</button></td>
     `;
-    const qtyInput = row.querySelector('td:nth-child(2) input[type="number"]');
-    const priceInput = row.querySelector('td:nth-child(3) input[type="number"]');
-    const totalInput = row.querySelector('td:nth-child(4) input[type="number"]');
+    const skuInput = row.querySelector('.line-sku-val');
+    if (skuInput) skuInput.value = String(sku ?? '').trim();
+    const qtyInput = row.querySelector('td:nth-child(3) input[type="number"]');
+    const priceInput = row.querySelector('td:nth-child(4) input[type="number"]');
+    const totalInput = row.querySelector('td:nth-child(5) input[type="number"]');
 
     const recalcLineTotal = () => {
         const qtyVal = parseFloat(qtyInput?.value) || 0;
@@ -1566,4 +2029,9 @@ function switchView(view) {
     document.getElementById('filterCompany').setAttribute('data-memory', memory.company);
 
     renderCurrentView();
+
+    const bulkModal = document.getElementById('bulkInvoiceModal');
+    if (bulkModal && bulkModal.style.display === 'flex') {
+        updateBulkDirectionHint();
+    }
 }

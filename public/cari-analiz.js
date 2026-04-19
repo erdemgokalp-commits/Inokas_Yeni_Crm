@@ -145,7 +145,7 @@ function groupByCompany(invoices, direction) {
 
       const bucket = map[name];
       const currency = normalizeCurrency(inv.currency);
-      const totalTl = parseFloat(inv.total_amount_tl) || 0;
+      const totalTl = parseFloat(inv.payable_amount_tl ?? inv.total_amount_tl) || 0;
       const paidTl = Math.min(parseFloat(inv.paid_amount) || 0, totalTl);
       const pendingTl = Math.max(totalTl - paidTl, 0);
 
@@ -238,7 +238,7 @@ function aggregateCompanyCurrencies(invoices) {
   const byCurrency = {};
   invoices.forEach((inv) => {
     const currency = normalizeCurrency(inv.currency);
-    const totalTl = parseFloat(inv.total_amount_tl) || 0;
+    const totalTl = parseFloat(inv.payable_amount_tl ?? inv.total_amount_tl) || 0;
     const paidTl = Math.min(parseFloat(inv.paid_amount) || 0, totalTl);
     const totalCur = getInvoiceCurrencyTotal(inv);
     const paidCur = totalTl > 0 ? (totalCur * (paidTl / totalTl)) : 0;
@@ -299,9 +299,11 @@ function renderStatusChip(status) {
 }
 
 function getInvoiceCurrencyTotal(inv) {
+  const payableCur = parseFloat(inv.payable_amount_cur);
+  if (!Number.isNaN(payableCur) && payableCur > 0) return payableCur;
   const totalCurrency = parseFloat(inv.total_currency);
   if (!Number.isNaN(totalCurrency) && totalCurrency > 0) return totalCurrency;
-  return parseFloat(inv.total_amount_tl) || 0;
+  return parseFloat(inv.payable_amount_tl ?? inv.total_amount_tl) || 0;
 }
 
 function normalizeCurrency(cur) {

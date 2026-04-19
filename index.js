@@ -1,16 +1,19 @@
 const express = require('express');
+const fs = require('fs');
 const path = require('path');
 const { createClient } = require('@supabase/supabase-js');
 const app = express();
 try {
-  require('dotenv').config();
+  // cwd’den bağımsız: proje kökündeki .env (index.js ile aynı klasör)
+  require('dotenv').config({ path: path.join(__dirname, '.env') });
 } catch (err) {
   // Railway gibi ortamlarda env panelden verildiği için dotenv zorunlu değildir.
   if (err.code !== 'MODULE_NOT_FOUND') throw err;
   console.warn('dotenv bulunamadı, ortam değişkenleri platformdan okunuyor.');
 }
 
-
+const inokasVknLoaded = !!(process.env.INOKAS_VKN || '').trim();
+console.log('INOKAS_VKN:', inokasVknLoaded ? 'yüklendi ✓' : 'TANIMSIZ — .env veya ortam değişkenini kontrol edin');
 
 // 1. ADD THIS: This allows your server to read the "Big Package" (JSON) sent from the browser
 app.use(express.json());
@@ -20,7 +23,24 @@ const supabase = createClient(
   process.env.SUPABASE_ANON_KEY
 );
 
+/** Ana sayfa: static’ten ÖNCE — aksi halde GET / hiç buraya düşmez, toplu XML için VKN enjekte edilemez */
+function getFaturalarIndexHtml() {
+  const htmlPath = path.join(__dirname, 'public', 'index.html');
+  let html = fs.readFileSync(htmlPath, 'utf8');
+  const vkn = (process.env.INOKAS_VKN || '').trim();
+  const inject = `<script>window.__INOKAS_VKN__=${JSON.stringify(vkn)};</script>`;
+  if (html.includes('</head>')) {
+    html = html.replace('</head>', `${inject}\n</head>`);
+  }
+  return html;
+}
 
+app.get('/', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.type('html').send(getFaturalarIndexHtml());
+});
 
 app.use(express.static(path.join(__dirname, 'public'), {
   setHeaders: (res, filePath) => {
@@ -33,12 +53,13 @@ app.use(express.static(path.join(__dirname, 'public'), {
   }
 }));
 
-
-
-
-app.get('/', (req, res) => {
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+/** Toplu XML sınıflandırması için (VKN kamuya yakın bilgi; sadece yön tespiti) */
+app.get('/api/inokas-vkn', (req, res) => {
+  const vkn = (process.env.INOKAS_VKN || '').trim();
+  if (!vkn) {
+    return res.status(503).json({ error: 'Sunucu yapılandırması: INOKAS_VKN tanımlı değil.' });
+  }
+  res.json({ vkn });
 });
 
 

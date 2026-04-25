@@ -1,9 +1,11 @@
 flask
 flask-cors
 pdfplumber
-pandas
+numpy==1.26.4
+pandas==2.1.4
 requests
 gunicorn
+python-dotenv
 beautifulsoup4
 lxml
-python-dotenv
+supabase
